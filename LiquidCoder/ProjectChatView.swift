@@ -10,30 +10,44 @@ import SwiftUI
 
 struct ProjectChatView: View {
     @Binding var project: CodexProject
+    @Binding var session: CodexSession
+    let workspace: CodexWorkspace?
     @ObservedObject var runtime: CodexRuntime
     @Binding var draftPrompt: String
     let sendPrompt: () -> Void
-
-    private var latestSession: CodexSession? {
-        project.sessions.first
-    }
+    let stopSession: () -> Void
+    let rerunLastPrompt: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let latestSession {
-                SessionContent(project: project, session: latestSession)
-            } else {
-                NewSessionContent(project: project)
-            }
+        HSplitView {
+            VStack(spacing: 0) {
+                if session.messages.isEmpty && session.terminalEvents.isEmpty && session.failureSummary == nil {
+                    NewSessionContent(project: project)
+                } else {
+                    SessionContent(project: project, session: session)
+                }
 
-            PromptComposer(
-                project: project,
-                isSessionActive: runtime.hasActiveSession(for: project.id),
-                draftPrompt: $draftPrompt,
-                sendPrompt: sendPrompt
-            )
+                PromptComposer(
+                    project: project,
+                    workspace: workspace,
+                    isSessionActive: runtime.hasActiveSession(for: session.id),
+                    draftPrompt: $draftPrompt,
+                    sendPrompt: sendPrompt
+                )
                 .padding(.horizontal, 32)
                 .padding(.bottom, 24)
+            }
+            .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+
+            TerminalMonitorSidebar(
+                project: project,
+                session: session,
+                workspace: workspace,
+                isSessionActive: runtime.hasActiveSession(for: session.id),
+                stopSession: stopSession,
+                rerunLastPrompt: rerunLastPrompt
+            )
+            .frame(minWidth: 320, idealWidth: 360, maxWidth: 420)
         }
         .background(.background)
         .navigationTitle(project.name)
@@ -86,6 +100,17 @@ struct EmptyProjectView: View {
     }
 }
 
+struct EmptySessionView: View {
+    var body: some View {
+        ContentUnavailableView {
+            Label("Select a chat", systemImage: "bubble.left.and.bubble.right")
+        } description: {
+            Text("Expand a project in the sidebar, open an existing chat, or create a new one.")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct NewSessionContent: View {
     let project: CodexProject
 
@@ -94,6 +119,10 @@ private struct NewSessionContent: View {
             Spacer()
             Text("What should Codex do in \(project.name)?")
                 .font(.largeTitle.weight(.semibold))
+                .multilineTextAlignment(.center)
+            Text("This session is idle. Your first message creates an isolated workspace, launches Codex there, and keeps the thread resumable.")
+                .font(.body)
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Text(project.rootPath)
                 .font(.callout)
@@ -112,33 +141,52 @@ private struct SessionContent: View {
     let session: CodexSession
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .center, spacing: 12) {
-                    Text(session.title)
-                        .font(.title.weight(.semibold))
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .center, spacing: 12) {
+                        Text(session.title)
+                            .font(.title.weight(.semibold))
 
-                    SessionStatusBadge(status: session.status)
-                }
+                        SessionStatusBadge(status: session.status)
+                    }
 
-                if let failureSummary = session.failureSummary {
-                    Text(failureSummary)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
+                    if let failureSummary = session.failureSummary {
+                        Text(failureSummary)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
 
-                if session.status == .running || session.status == .launching {
-                    ProgressView("Codex is running in \(project.name)")
-                        .font(.callout)
-                }
+                    if session.status == .launching || session.status == .running {
+                        ProgressView("Codex is running in \(project.name)")
+                            .font(.callout)
+                    }
 
-                ForEach(session.messages) { message in
-                    ChatBubble(message: message)
+                    ForEach(session.messages) { message in
+                        ChatBubble(message: message)
+                            .id(message.id)
+                    }
                 }
+                .padding(32)
+                .frame(maxWidth: 860, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
-            .padding(32)
-            .frame(maxWidth: 860, alignment: .leading)
-            .frame(maxWidth: .infinity)
+            .onAppear {
+                scrollToLastMessage(proxy)
+            }
+            .onChange(of: session.messages.count) { _, _ in
+                scrollToLastMessage(proxy)
+            }
+        }
+    }
+
+    private func scrollToLastMessage(_ proxy: ScrollViewProxy) {
+        guard let lastID = session.messages.last?.id else {
+            return
+        }
+
+        withAnimation(.easeOut(duration: 0.18)) {
+            proxy.scrollTo(lastID, anchor: .bottom)
         }
     }
 }
@@ -190,22 +238,21 @@ private struct SessionStatusBadge: View {
 
     private var statusColor: Color {
         switch status {
-        case .created:
+        case .idle, .cancelled:
             return .secondary
         case .launching, .running:
             return .orange
-        case .completed:
+        case .waitingForInput, .completed:
             return .green
         case .failed:
             return .red
-        case .cancelled:
-            return .secondary
         }
     }
 }
 
 private struct PromptComposer: View {
     let project: CodexProject
+    let workspace: CodexWorkspace?
     let isSessionActive: Bool
     @Binding var draftPrompt: String
     let sendPrompt: () -> Void
@@ -221,7 +268,7 @@ private struct PromptComposer: View {
                     .padding(.top, 8)
 
                 if draftPrompt.isEmpty {
-                    Text("Ask Codex anything. @ to mention files or context")
+                    Text("Ask Codex anything. The first prompt creates an isolated worktree for this session.")
                         .foregroundStyle(.secondary.opacity(0.6))
                         .padding(.horizontal, 18)
                         .padding(.top, 17)
@@ -243,8 +290,11 @@ private struct PromptComposer: View {
                 Spacer()
 
                 Label(project.name, systemImage: "folder")
-                Label("Work locally", systemImage: "laptopcomputer")
-                Label(project.branch, systemImage: "arrow.triangle.branch")
+                if let workspace {
+                    Label(workspace.branchName, systemImage: "arrow.triangle.branch")
+                } else {
+                    Label(project.branch, systemImage: "arrow.triangle.branch")
+                }
 
                 Button(action: sendPrompt) {
                     Image(systemName: "arrow.up")
@@ -272,6 +322,184 @@ private struct PromptComposer: View {
     private var sendButtonColor: Color {
         promptIsEmpty ? Color.secondary.opacity(0.55) : Color.accentColor
     }
+}
+
+private struct TerminalMonitorSidebar: View {
+    let project: CodexProject
+    let session: CodexSession
+    let workspace: CodexWorkspace?
+    let isSessionActive: Bool
+    let stopSession: () -> Void
+    let rerunLastPrompt: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Terminal")
+                    .font(.headline.weight(.semibold))
+
+                Spacer()
+
+                SessionStatusBadge(status: session.status)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                DetailRow(label: "Project", value: project.name)
+                DetailRow(label: "Root", value: project.rootPath)
+                if let workspace {
+                    DetailRow(label: "Branch", value: workspace.branchName)
+                    DetailRow(label: "Worktree", value: workspace.worktreePath)
+                }
+                if let threadID = session.threadID {
+                    DetailRow(label: "Thread", value: threadID)
+                }
+            }
+
+            if let lastCommand = session.lastCommand {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Last Command")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    ScrollView {
+                        Text(lastCommand)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 90)
+                    .padding(10)
+                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button("Stop", action: stopSession)
+                    .disabled(!isSessionActive)
+                Button("Rerun", action: rerunLastPrompt)
+                    .disabled(isSessionActive || session.lastPrompt == nil)
+                Button("Copy Output") {
+                    copyToPasteboard(session.terminalEvents.map(\.text).joined(separator: "\n"))
+                }
+                .disabled(session.terminalEvents.isEmpty)
+            }
+            .buttonStyle(.glass)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Recent Output")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        if session.terminalEvents.isEmpty {
+                            Text("No terminal output yet. LiquidCoder will stream the Codex CLI transcript here.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            ForEach(session.terminalEvents.suffix(120)) { event in
+                                TerminalEventRow(event: event)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(10)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+        }
+        .padding(20)
+        .background(.bar)
+    }
+}
+
+private struct DetailRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(2)
+                .truncationMode(.middle)
+        }
+    }
+}
+
+private struct TerminalEventRow: View {
+    let event: TerminalEvent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label(streamLabel, systemImage: streamIcon)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(streamColor)
+
+                Spacer()
+
+                Text(event.createdAt, style: .time)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(event.text)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(8)
+        .background(streamColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var streamLabel: String {
+        switch event.stream {
+        case .stdout:
+            return "stdout"
+        case .stderr:
+            return "stderr"
+        case .system:
+            return "system"
+        }
+    }
+
+    private var streamIcon: String {
+        switch event.stream {
+        case .stdout:
+            return "terminal"
+        case .stderr:
+            return "exclamationmark.triangle"
+        case .system:
+            return "gearshape"
+        }
+    }
+
+    private var streamColor: Color {
+        switch event.stream {
+        case .stdout:
+            return .secondary
+        case .stderr:
+            return .red
+        case .system:
+            return .blue
+        }
+    }
+}
+
+private func copyToPasteboard(_ text: String) {
+    guard !text.isEmpty else {
+        return
+    }
+
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
 }
 
 private func openInFinder(_ project: CodexProject) {

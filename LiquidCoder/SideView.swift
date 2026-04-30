@@ -9,17 +9,15 @@ import SwiftUI
 
 struct SideView: View {
     let projects: [CodexProject]
-    @Binding var selectedProjectID: CodexProject.ID?
+    @Binding var selectedSessionID: CodexSession.ID?
+    @Binding var expandedProjectIDs: Set<CodexProject.ID>
     let addProject: () -> Void
+    let toggleProjectExpansion: (CodexProject.ID) -> Void
+    let selectSession: (CodexProject.ID, CodexSession.ID) -> Void
+    let createSession: (CodexProject.ID) -> Void
 
     var body: some View {
-        List(selection: $selectedProjectID) {
-            Section {
-                Label("New Chat", systemImage: "square.and.pencil")
-                Label("Search", systemImage: "magnifyingglass")
-                Label("Plugins", systemImage: "square.grid.2x2")
-            }
-
+        List {
             Section("Projects") {
                 if projects.isEmpty {
                     ContentUnavailableView(
@@ -30,17 +28,14 @@ struct SideView: View {
                     .frame(minHeight: 120)
                 } else {
                     ForEach(projects) { project in
-                        Label(project.name, systemImage: "folder")
-                            .tag(project.id)
-
-                        if project.id == selectedProjectID {
-                            ForEach(project.sessions.prefix(4)) { session in
-                                Label(session.title, systemImage: session.status.systemImage)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.leading, 16)
-                            }
-                        }
+                        ProjectSidebarGroup(
+                            project: project,
+                            selectedSessionID: selectedSessionID,
+                            isExpanded: expandedProjectIDs.contains(project.id),
+                            toggleProjectExpansion: toggleProjectExpansion,
+                            selectSession: selectSession,
+                            createSession: createSession
+                        )
                     }
                 }
             }
@@ -55,5 +50,84 @@ struct SideView: View {
                 .buttonStyle(.glass)
             }
         }
+    }
+}
+
+private struct ProjectSidebarGroup: View {
+    let project: CodexProject
+    let selectedSessionID: CodexSession.ID?
+    let isExpanded: Bool
+    let toggleProjectExpansion: (CodexProject.ID) -> Void
+    let selectSession: (CodexProject.ID, CodexSession.ID) -> Void
+    let createSession: (CodexProject.ID) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    toggleProjectExpansion(project.id)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+
+                        Label(project.name, systemImage: "folder")
+                            .foregroundStyle(.primary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    createSession(project.id)
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("New Chat")
+            }
+
+            if isExpanded {
+                if project.sessions.isEmpty {
+                    Button {
+                        createSession(project.id)
+                    } label: {
+                        Label("New Chat", systemImage: "plus")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 24)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    ForEach(project.sessions) { session in
+                        Button {
+                            selectSession(project.id, session.id)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: session.status.systemImage)
+                                    .foregroundStyle(selectedSessionID == session.id ? .primary : .secondary)
+                                Text(session.title)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .font(.caption)
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 8)
+                            .background(rowBackground(for: session), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .padding(.leading, 20)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func rowBackground(for session: CodexSession) -> Color {
+        selectedSessionID == session.id ? Color.accentColor.opacity(0.16) : .clear
     }
 }

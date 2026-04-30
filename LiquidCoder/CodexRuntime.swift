@@ -6,164 +6,379 @@
 //
 
 import Combine
+import Darwin
 import Foundation
 
 @MainActor
 final class CodexRuntime: ObservableObject {
+    private static let bundledShellPath = "/bin/zsh"
+    private static let defaultSearchPaths = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin"
+    ]
+
+    struct PreparedSessionContext {
+        let projectID: CodexProject.ID
+        let sessionID: CodexSession.ID
+        let projectRootURL: URL
+        let securityScopeActive: Bool
+        let workspace: CodexWorkspace
+        let sourceBranch: String
+        let codexExecutableURL: URL
+    }
+
     enum SessionEvent {
         case status(CodexSessionStatus)
         case threadStarted(String)
         case agentMessage(String)
+        case commandStarted(String)
+        case terminalEvent(TerminalEvent)
         case failed(String)
+    }
+
+    enum RuntimeError: LocalizedError {
+        case missingCodexCLI
+        case missingGitCLI
+        case workspace(WorkspaceManager.WorkspaceError)
+        case launchFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingCodexCLI:
+                return "LiquidCoder could not find the `codex` CLI in your terminal environment. Install it somewhere stable like `/opt/homebrew/bin/codex` or `/usr/local/bin/codex`, or set `CODEX_CLI_PATH`."
+            case .missingGitCLI:
+                return "LiquidCoder could not find `git`. Install the Xcode command line tools or make `git` available on PATH."
+            case .workspace(let error):
+                return error.localizedDescription
+            case .launchFailed(let details):
+                return "LiquidCoder failed to launch the Codex session. \(details)"
+            }
+        }
     }
 
     private struct RunningSession {
         let projectID: CodexProject.ID
         let process: Process
-        let stdoutReader: PipeLineReader
-        let stderrReader: PipeLineReader
-        let rootURL: URL
+        let reader: PTYReader
+        let masterHandle: FileHandle
+        let slaveInputHandle: FileHandle
+        let slaveOutputHandle: FileHandle
+        let slaveErrorHandle: FileHandle
+        let projectRootURL: URL
         let securityScopeActive: Bool
         let onEvent: @MainActor (SessionEvent) -> Void
-        var stderrLines: [String] = []
-        var didCompleteTurn = false
+        var diagnostics: [String] = []
+        var sawTurnCompletion = false
+        var requestedStop = false
     }
 
-    @Published private(set) var activeProjectIDs: Set<CodexProject.ID> = []
+    @Published private(set) var activeSessionIDs: Set<CodexSession.ID> = []
 
+    private let workspaceManager = WorkspaceManager()
     private var runningSessions: [CodexSession.ID: RunningSession] = [:]
 
-    func hasActiveSession(for projectID: CodexProject.ID) -> Bool {
-        activeProjectIDs.contains(projectID)
+    func hasActiveSession(for sessionID: CodexSession.ID) -> Bool {
+        activeSessionIDs.contains(sessionID)
     }
 
-    func launch(
-        project: CodexProject,
-        sessionID: CodexSession.ID,
+    func prepareWorkspace(for session: CodexSession, in project: CodexProject) throws -> PreparedSessionContext {
+        let projectRootURL = project.resolvedRootURL
+        let securityScopeActive = projectRootURL.startAccessingSecurityScopedResource()
+
+        do {
+            guard let codexExecutableURL = resolveExecutableURL(named: "codex") else {
+                throw RuntimeError.missingCodexCLI
+            }
+            guard resolveExecutableURL(named: "git") != nil else {
+                throw RuntimeError.missingGitCLI
+            }
+
+            let context = try workspaceManager.prepareWorkspace(for: session, in: project)
+            return PreparedSessionContext(
+                projectID: project.id,
+                sessionID: session.id,
+                projectRootURL: projectRootURL,
+                securityScopeActive: securityScopeActive,
+                workspace: context.workspace,
+                sourceBranch: context.sourceBranch,
+                codexExecutableURL: codexExecutableURL
+            )
+        } catch let error as RuntimeError {
+            if securityScopeActive {
+                projectRootURL.stopAccessingSecurityScopedResource()
+            }
+            throw error
+        } catch let error as WorkspaceManager.WorkspaceError {
+            if securityScopeActive {
+                projectRootURL.stopAccessingSecurityScopedResource()
+            }
+            throw RuntimeError.workspace(error)
+        } catch {
+            if securityScopeActive {
+                projectRootURL.stopAccessingSecurityScopedResource()
+            }
+            throw RuntimeError.launchFailed(error.localizedDescription)
+        }
+    }
+
+    func startSession(
+        session: CodexSession,
+        context: PreparedSessionContext,
         prompt: String,
         onEvent: @escaping @MainActor (SessionEvent) -> Void
     ) {
-        guard !hasActiveSession(for: project.id) else {
-            onEvent(.failed("A Codex session is already running for this project. LiquidCoder blocks concurrent launches in one worktree because collision risk is real."))
-            return
-        }
-
-        let rootURL = project.resolvedRootURL
-        let securityScopeActive = rootURL.startAccessingSecurityScopedResource()
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [
-            "codex",
-            "exec",
-            "--json",
-            "--color",
-            "never",
-            "--full-auto",
-            "--skip-git-repo-check",
-            "-C",
-            rootURL.path,
-            prompt
-        ]
-        process.currentDirectoryURL = rootURL
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        let stdoutReader = PipeLineReader(fileHandle: stdoutPipe.fileHandleForReading)
-        let stderrReader = PipeLineReader(fileHandle: stderrPipe.fileHandleForReading)
-
-        stdoutReader.onLine = { [weak self] line in
-            DispatchQueue.main.async {
-                self?.handleStandardOutputLine(line, sessionID: sessionID)
-            }
-        }
-        stderrReader.onLine = { [weak self] line in
-            DispatchQueue.main.async {
-                self?.handleStandardErrorLine(line, sessionID: sessionID)
-            }
-        }
-        process.terminationHandler = { [weak self] terminatedProcess in
-            DispatchQueue.main.async {
-                self?.handleTermination(of: sessionID, process: terminatedProcess)
-            }
-        }
-
-        runningSessions[sessionID] = RunningSession(
-            projectID: project.id,
-            process: process,
-            stdoutReader: stdoutReader,
-            stderrReader: stderrReader,
-            rootURL: rootURL,
-            securityScopeActive: securityScopeActive,
+        launchSession(
+            session: session,
+            context: context,
+            prompt: prompt,
+            isResume: false,
             onEvent: onEvent
         )
-        activeProjectIDs.insert(project.id)
-        onEvent(.status(.launching))
-
-        do {
-            try process.run()
-            stdoutReader.start()
-            stderrReader.start()
-        } catch {
-            finishFailedLaunch(
-                sessionID: sessionID,
-                summary: "LiquidCoder failed to launch `codex`: \(error.localizedDescription)"
-            )
-        }
     }
 
-    private func handleStandardOutputLine(_ line: String, sessionID: CodexSession.ID) {
-        guard
-            let data = line.data(using: .utf8),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let type = object["type"] as? String,
-            var runningSession = runningSessions[sessionID]
-        else {
-            return
-        }
-
-        switch type {
-        case "thread.started":
-            if let threadID = object["thread_id"] as? String {
-                runningSession.onEvent(.threadStarted(threadID))
-            }
-        case "turn.started":
-            runningSession.onEvent(.status(.running))
-        case "item.completed":
-            if
-                let item = object["item"] as? [String: Any],
-                let itemType = item["type"] as? String,
-                itemType == "agent_message",
-                let text = item["text"] as? String,
-                !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            {
-                runningSession.onEvent(.agentMessage(text))
-            }
-        case "turn.completed":
-            runningSession.didCompleteTurn = true
-            runningSession.onEvent(.status(.completed))
-        default:
-            break
-        }
-
-        runningSessions[sessionID] = runningSession
+    func resumeSession(
+        session: CodexSession,
+        context: PreparedSessionContext,
+        prompt: String,
+        onEvent: @escaping @MainActor (SessionEvent) -> Void
+    ) {
+        launchSession(
+            session: session,
+            context: context,
+            prompt: prompt,
+            isResume: true,
+            onEvent: onEvent
+        )
     }
 
-    private func handleStandardErrorLine(_ line: String, sessionID: CodexSession.ID) {
+    func stopSession(_ sessionID: CodexSession.ID) {
         guard var runningSession = runningSessions[sessionID] else {
             return
         }
 
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        runningSession.requestedStop = true
+        runningSessions[sessionID] = runningSession
+        runningSession.process.terminate()
+    }
+
+    private func launchSession(
+        session: CodexSession,
+        context: PreparedSessionContext,
+        prompt: String,
+        isResume: Bool,
+        onEvent: @escaping @MainActor (SessionEvent) -> Void
+    ) {
+        guard !activeSessionIDs.contains(session.id) else {
+            onEvent(.failed("This session is already running. Wait for Codex to finish or stop it before sending another prompt."))
+            releaseSecurityScope(for: context)
+            return
+        }
+
+        do {
+            let launch = try makeLaunchHandles()
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: Self.bundledShellPath)
+            process.arguments = ["-lc", shellCommand(isResume: isResume)]
+            process.currentDirectoryURL = context.workspace.worktreeURL
+            process.standardInput = launch.slaveInputHandle
+            process.standardOutput = launch.slaveOutputHandle
+            process.standardError = launch.slaveErrorHandle
+            process.environment = launchEnvironment(
+                session: session,
+                prompt: prompt,
+                workspace: context.workspace,
+                codexExecutablePath: context.codexExecutableURL.path
+            )
+
+            let sessionID = session.id
+            let reader = PTYReader(fileHandle: launch.masterHandle)
+            reader.onLine = { [weak self] line in
+                DispatchQueue.main.async {
+                    self?.handleTerminalLine(
+                        line,
+                        sessionID: sessionID,
+                        parsedStream: .stdout
+                    )
+                }
+            }
+
+            process.terminationHandler = { [weak self] terminatedProcess in
+                DispatchQueue.main.async {
+                    self?.handleTermination(of: sessionID, process: terminatedProcess)
+                }
+            }
+
+            var command = "$ cd \(context.workspace.worktreePath)\n"
+            command += "$ \(context.codexExecutableURL.path) "
+            if isResume, let threadID = session.threadID, !threadID.isEmpty {
+                command += "--cd \(context.workspace.worktreePath) exec resume --json --full-auto --skip-git-repo-check \(threadID) <prompt>"
+            } else {
+                command += "--cd \(context.workspace.worktreePath) exec --json --color never --full-auto --skip-git-repo-check <prompt>"
+            }
+
+            runningSessions[sessionID] = RunningSession(
+                projectID: context.projectID,
+                process: process,
+                reader: reader,
+                masterHandle: launch.masterHandle,
+                slaveInputHandle: launch.slaveInputHandle,
+                slaveOutputHandle: launch.slaveOutputHandle,
+                slaveErrorHandle: launch.slaveErrorHandle,
+                projectRootURL: context.projectRootURL,
+                securityScopeActive: context.securityScopeActive,
+                onEvent: onEvent
+            )
+            activeSessionIDs.insert(sessionID)
+
+            onEvent(.status(.launching))
+            onEvent(.commandStarted(command))
+            onEvent(.terminalEvent(TerminalEvent(
+                sessionID: sessionID,
+                stream: .system,
+                text: command,
+                parsedEventType: "command.started"
+            )))
+
+            try process.run()
+            reader.start()
+            close(launch.slaveFD)
+        } catch let error as RuntimeError {
+            releaseSecurityScope(for: context)
+            onEvent(.failed(error.localizedDescription))
+        } catch {
+            releaseSecurityScope(for: context)
+            onEvent(.failed("LiquidCoder failed to launch the session process. \(error.localizedDescription)"))
+        }
+    }
+
+    private func resolveExecutableURL(named executable: String) -> URL? {
+        let environment = ProcessInfo.processInfo.environment
+
+        if executable == "codex",
+           let explicitPath = environment["CODEX_CLI_PATH"],
+           FileManager.default.isExecutableFile(atPath: explicitPath) {
+            return URL(fileURLWithPath: explicitPath)
+        }
+
+        let pathEntries = (environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+        let candidates = pathEntries + Self.defaultSearchPaths
+
+        for directory in candidates {
+            let path = URL(fileURLWithPath: directory).appendingPathComponent(executable).path
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+
+        return nil
+    }
+
+    private func launchEnvironment(
+        session: CodexSession,
+        prompt: String,
+        workspace: CodexWorkspace,
+        codexExecutablePath: String
+    ) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        let currentEntries = (environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+        let mergedEntries = Array(NSOrderedSet(array: currentEntries + Self.defaultSearchPaths)) as? [String] ?? Self.defaultSearchPaths
+        environment["PATH"] = mergedEntries.joined(separator: ":")
+        environment["SHELL"] = environment["SHELL"] ?? Self.bundledShellPath
+        environment["LC_CODEX_BIN"] = codexExecutablePath
+        environment["LC_WORKTREE_ROOT"] = workspace.worktreePath
+        environment["LC_PROMPT"] = prompt
+        environment["LC_THREAD_ID"] = session.threadID ?? ""
+        return environment
+    }
+
+    private func shellCommand(isResume: Bool) -> String {
+        if isResume {
+            return """
+            cd -- "$LC_WORKTREE_ROOT" || exit 1
+            exec "$LC_CODEX_BIN" --cd "$LC_WORKTREE_ROOT" exec resume --json --full-auto --skip-git-repo-check "$LC_THREAD_ID" "$LC_PROMPT"
+            """
+        }
+
+        return """
+        cd -- "$LC_WORKTREE_ROOT" || exit 1
+        exec "$LC_CODEX_BIN" --cd "$LC_WORKTREE_ROOT" exec --json --color never --full-auto --skip-git-repo-check "$LC_PROMPT"
+        """
+    }
+
+    private func handleTerminalLine(
+        _ line: String,
+        sessionID: CodexSession.ID,
+        parsedStream: TerminalEventStream
+    ) {
+        guard var runningSession = runningSessions[sessionID] else {
+            return
+        }
+
+        let trimmed = line.trimmingCharacters(in: .newlines)
         guard !trimmed.isEmpty else {
             return
         }
 
-        runningSession.stderrLines.append(trimmed)
-        if runningSession.stderrLines.count > 40 {
-            runningSession.stderrLines.removeFirst(runningSession.stderrLines.count - 40)
+        if
+            let data = trimmed.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let type = object["type"] as? String
+        {
+            runningSession.onEvent(.terminalEvent(TerminalEvent(
+                sessionID: sessionID,
+                stream: parsedStream,
+                text: trimmed,
+                parsedEventType: type
+            )))
+
+            switch type {
+            case "thread.started":
+                if let threadID = object["thread_id"] as? String {
+                    runningSession.onEvent(.threadStarted(threadID))
+                }
+            case "turn.started":
+                runningSession.onEvent(.status(.running))
+            case "item.completed":
+                if
+                    let item = object["item"] as? [String: Any],
+                    let itemType = item["type"] as? String,
+                    itemType == "agent_message",
+                    let text = item["text"] as? String,
+                    !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                {
+                    runningSession.onEvent(.agentMessage(text))
+                }
+            case "turn.completed":
+                runningSession.sawTurnCompletion = true
+                runningSession.onEvent(.status(.waitingForInput))
+            default:
+                break
+            }
+
+            runningSessions[sessionID] = runningSession
+            return
+        }
+
+        if shouldSurfaceTerminalLine(trimmed) {
+            runningSession.onEvent(.terminalEvent(TerminalEvent(
+                sessionID: sessionID,
+                stream: parsedStream,
+                text: trimmed,
+                parsedEventType: nil
+            )))
+
+            runningSession.diagnostics.append(trimmed)
+            if runningSession.diagnostics.count > 60 {
+                runningSession.diagnostics.removeFirst(runningSession.diagnostics.count - 60)
+            }
         }
 
         runningSessions[sessionID] = runningSession
@@ -174,45 +389,122 @@ final class CodexRuntime: ObservableObject {
             return
         }
 
-        runningSession.stdoutReader.stop()
-        runningSession.stderrReader.stop()
+        activeSessionIDs.remove(sessionID)
+        runningSession.reader.stop()
+        closeHandles(for: runningSession)
 
         if runningSession.securityScopeActive {
-            runningSession.rootURL.stopAccessingSecurityScopedResource()
+            runningSession.projectRootURL.stopAccessingSecurityScopedResource()
         }
 
-        activeProjectIDs.remove(runningSession.projectID)
+        if runningSession.requestedStop {
+            runningSession.onEvent(.status(.cancelled))
+            runningSession.onEvent(.terminalEvent(TerminalEvent(
+                sessionID: sessionID,
+                stream: .system,
+                text: "Session stopped by LiquidCoder.",
+                parsedEventType: "session.cancelled"
+            )))
+            return
+        }
 
         guard process.terminationStatus == 0 else {
-            let summary = runningSession.stderrLines.last
-                ?? "Codex exited with status \(process.terminationStatus). LiquidCoder launched the process, but the CLI failed before completing the turn."
+            let summary = runningSession.diagnostics.last
+                ?? "Codex exited with status \(process.terminationStatus)."
             runningSession.onEvent(.failed(summary))
             return
         }
 
-        if !runningSession.didCompleteTurn {
+        if !runningSession.sawTurnCompletion {
             runningSession.onEvent(.status(.completed))
         }
     }
 
-    private func finishFailedLaunch(sessionID: CodexSession.ID, summary: String) {
-        guard let runningSession = runningSessions.removeValue(forKey: sessionID) else {
-            return
+    private func shouldSurfaceTerminalLine(_ line: String) -> Bool {
+        if line.hasPrefix("{") {
+            return false
         }
 
-        runningSession.stdoutReader.stop()
-        runningSession.stderrReader.stop()
+        let noisyPrefixes = [
+            "202",
+            "<html>",
+            "<head>",
+            "<body>",
+            "<div",
+            "<svg",
+            "<path",
+            "</"
+        ]
+        let noisySubstrings = [
+            "codex_analytics::client",
+            "codex_core::plugins::manifest",
+            "Enable JavaScript and cookies to continue",
+            "challenge-platform"
+        ]
 
-        if runningSession.securityScopeActive {
-            runningSession.rootURL.stopAccessingSecurityScopedResource()
+        if noisyPrefixes.contains(where: { line.hasPrefix($0) }) {
+            return line.contains("error:") || line.contains("No such file or directory")
         }
 
-        activeProjectIDs.remove(runningSession.projectID)
-        runningSession.onEvent(.failed(summary))
+        if noisySubstrings.contains(where: { line.contains($0) }) {
+            return false
+        }
+
+        return true
+    }
+
+    private func releaseSecurityScope(for context: PreparedSessionContext) {
+        if context.securityScopeActive {
+            context.projectRootURL.stopAccessingSecurityScopedResource()
+        }
+    }
+
+    private func closeHandles(for session: RunningSession) {
+        session.masterHandle.readabilityHandler = nil
+        try? session.masterHandle.close()
+        try? session.slaveInputHandle.close()
+        try? session.slaveOutputHandle.close()
+        try? session.slaveErrorHandle.close()
+    }
+
+    private func makeLaunchHandles() throws -> PTYLaunchHandles {
+        var masterFD: Int32 = 0
+        var slaveFD: Int32 = 0
+
+        guard openpty(&masterFD, &slaveFD, nil, nil, nil) == 0 else {
+            throw RuntimeError.launchFailed(String(cString: strerror(errno)))
+        }
+
+        guard
+            let slaveInput = FileHandle(validatingDescriptor: dup(slaveFD)),
+            let slaveOutput = FileHandle(validatingDescriptor: dup(slaveFD)),
+            let slaveError = FileHandle(validatingDescriptor: dup(slaveFD)),
+            let masterHandle = FileHandle(validatingDescriptor: masterFD)
+        else {
+            close(masterFD)
+            close(slaveFD)
+            throw RuntimeError.launchFailed("Failed to allocate terminal descriptors.")
+        }
+
+        return PTYLaunchHandles(
+            masterHandle: masterHandle,
+            slaveInputHandle: slaveInput,
+            slaveOutputHandle: slaveOutput,
+            slaveErrorHandle: slaveError,
+            slaveFD: slaveFD
+        )
     }
 }
 
-private final class PipeLineReader {
+private struct PTYLaunchHandles {
+    let masterHandle: FileHandle
+    let slaveInputHandle: FileHandle
+    let slaveOutputHandle: FileHandle
+    let slaveErrorHandle: FileHandle
+    let slaveFD: Int32
+}
+
+private final class PTYReader {
     let fileHandle: FileHandle
     var onLine: ((String) -> Void)?
 
@@ -245,7 +537,9 @@ private final class PipeLineReader {
             let lineData = buffer.subdata(in: 0..<newlineRange.lowerBound)
             buffer.removeSubrange(0...newlineRange.lowerBound)
 
-            if let line = String(data: lineData, encoding: .utf8) {
+            let line = String(data: lineData, encoding: .utf8)?
+                .replacingOccurrences(of: "\r", with: "")
+            if let line, !line.isEmpty {
                 onLine?(line)
             }
         }
@@ -258,8 +552,20 @@ private final class PipeLineReader {
 
         defer { buffer.removeAll(keepingCapacity: false) }
 
-        if let line = String(data: buffer, encoding: .utf8) {
+        let line = String(data: buffer, encoding: .utf8)?
+            .replacingOccurrences(of: "\r", with: "")
+        if let line, !line.isEmpty {
             onLine?(line)
         }
+    }
+}
+
+private extension FileHandle {
+    convenience init?(validatingDescriptor descriptor: Int32) {
+        guard descriptor >= 0 else {
+            return nil
+        }
+
+        self.init(fileDescriptor: descriptor, closeOnDealloc: true)
     }
 }

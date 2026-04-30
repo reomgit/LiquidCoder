@@ -10,47 +10,67 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var projects = ProjectStore.load()
-    @State private var selectedProjectID: CodexProject.ID?
+    @State private var selectedSessionID: CodexSession.ID?
+    @State private var expandedProjectIDs: Set<CodexProject.ID> = []
     @State private var draftPrompt = ""
     @StateObject private var runtime = CodexRuntime()
- 
-    private var selectedProjectIndex: Int? {
-        guard let selectedProjectID else {
+
+    private var selectedSessionLocation: (projectIndex: Int, sessionIndex: Int)? {
+        guard let selectedSessionID else {
             return nil
         }
 
-        return projects.firstIndex { $0.id == selectedProjectID }
+        for (projectIndex, project) in projects.enumerated() {
+            if let sessionIndex = project.sessions.firstIndex(where: { $0.id == selectedSessionID }) {
+                return (projectIndex, sessionIndex)
+            }
+        }
+
+        return nil
     }
 
     var body: some View {
         NavigationSplitView {
             SideView(
                 projects: projects,
-                selectedProjectID: $selectedProjectID,
-                addProject: addProject
+                selectedSessionID: $selectedSessionID,
+                expandedProjectIDs: $expandedProjectIDs,
+                addProject: addProject,
+                toggleProjectExpansion: toggleProjectExpansion,
+                selectSession: selectSession,
+                createSession: createSession
             )
             .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
         } detail: {
-            if let selectedProjectIndex {
+            if let selectedSessionLocation {
+                let projectBinding = $projects[selectedSessionLocation.projectIndex]
+                let sessionBinding = $projects[selectedSessionLocation.projectIndex].sessions[selectedSessionLocation.sessionIndex]
+                let session = projects[selectedSessionLocation.projectIndex].sessions[selectedSessionLocation.sessionIndex]
+                let project = projects[selectedSessionLocation.projectIndex]
+
                 ProjectChatView(
-                    project: $projects[selectedProjectIndex],
+                    project: projectBinding,
+                    session: sessionBinding,
+                    workspace: project.workspace(id: session.workspaceID),
                     runtime: runtime,
                     draftPrompt: $draftPrompt,
-                    sendPrompt: sendPrompt
+                    sendPrompt: sendPrompt,
+                    stopSession: stopSelectedSession,
+                    rerunLastPrompt: rerunLastPrompt
                 )
-            } else {
+            } else if projects.isEmpty {
                 EmptyProjectView(addProject: addProject)
+            } else {
+                EmptySessionView()
             }
         }
-        .frame(minWidth: 980, minHeight: 660)
+        .frame(minWidth: 1080, minHeight: 700)
         .onAppear {
-            selectedProjectID = selectedProjectID ?? projects.first?.id
+            syncSidebarState(with: projects)
         }
         .onChange(of: projects) { _, newValue in
             ProjectStore.save(newValue)
-            if selectedProjectID == nil || !newValue.contains(where: { $0.id == selectedProjectID }) {
-                selectedProjectID = newValue.first?.id
-            }
+            syncSidebarState(with: newValue)
         }
     }
 
@@ -66,7 +86,12 @@ struct ContentView: View {
         }
 
         guard !projects.contains(where: { $0.rootPath == url.path }) else {
-            selectedProjectID = projects.first { $0.rootPath == url.path }?.id
+            if let existingProject = projects.first(where: { $0.rootPath == url.path }) {
+                expandedProjectIDs.insert(existingProject.id)
+                if let firstSession = existingProject.sessions.first {
+                    selectedSessionID = firstSession.id
+                }
+            }
             return
         }
 
@@ -81,31 +106,90 @@ struct ContentView: View {
             bookmarkData: bookmarkData
         )
         projects.append(project)
-        selectedProjectID = project.id
+        expandedProjectIDs.insert(project.id)
     }
 
     private func sendPrompt() {
-        let prompt = draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, let selectedProjectIndex else {
+        sendPrompt(text: draftPrompt)
+    }
+
+    private func sendPrompt(text: String) {
+        let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, let selectedSessionLocation else {
             return
         }
 
-        let project = projects[selectedProjectIndex]
-        guard !runtime.hasActiveSession(for: project.id) else {
+        let projectIndex = selectedSessionLocation.projectIndex
+        let sessionIndex = selectedSessionLocation.sessionIndex
+        let sessionID = projects[projectIndex].sessions[sessionIndex].id
+
+        guard !runtime.hasActiveSession(for: sessionID) else {
             return
         }
 
-        let session = CodexSession(
-            title: String(prompt.prefix(54)),
-            messages: [ChatMessage(role: .user, text: prompt)]
-        )
+        if projects[projectIndex].sessions[sessionIndex].isUntitled {
+            projects[projectIndex].sessions[sessionIndex].title = String(prompt.prefix(54))
+        }
 
-        projects[selectedProjectIndex].sessions.insert(session, at: 0)
+        projects[projectIndex].sessions[sessionIndex].messages.append(ChatMessage(role: .user, text: prompt))
+        projects[projectIndex].sessions[sessionIndex].status = .launching
+        projects[projectIndex].sessions[sessionIndex].failureSummary = nil
         draftPrompt = ""
 
-        runtime.launch(project: project, sessionID: session.id, prompt: prompt) { event in
-            apply(event, sessionID: session.id, projectID: project.id)
+        let session = projects[projectIndex].sessions[sessionIndex]
+        let project = projects[projectIndex]
+
+        do {
+            let context = try runtime.prepareWorkspace(for: session, in: project)
+            projects[projectIndex].branch = context.sourceBranch
+            projects[projectIndex].upsertWorkspace(context.workspace)
+            projects[projectIndex].sessions[sessionIndex].workspaceID = context.workspace.id
+
+            let latestSession = projects[projectIndex].sessions[sessionIndex]
+            if latestSession.threadID?.isEmpty == false {
+                runtime.resumeSession(session: latestSession, context: context, prompt: prompt) { event in
+                    apply(event, sessionID: latestSession.id, projectID: context.projectID)
+                }
+            } else {
+                runtime.startSession(session: latestSession, context: context, prompt: prompt) { event in
+                    apply(event, sessionID: latestSession.id, projectID: context.projectID)
+                }
+            }
+        } catch {
+            let summary = error.localizedDescription
+            projects[projectIndex].sessions[sessionIndex].status = .failed
+            projects[projectIndex].sessions[sessionIndex].failureSummary = summary
+            projects[projectIndex].sessions[sessionIndex].messages.append(ChatMessage(role: .system, text: summary))
+            appendTerminalEvent(
+                TerminalEvent(
+                    sessionID: sessionID,
+                    stream: .system,
+                    text: summary,
+                    parsedEventType: "session.failed"
+                ),
+                toProjectID: project.id
+            )
         }
+    }
+
+    private func stopSelectedSession() {
+        guard let selectedSessionID else {
+            return
+        }
+
+        runtime.stopSession(selectedSessionID)
+    }
+
+    private func rerunLastPrompt() {
+        guard
+            let selectedSessionLocation,
+            let lastPrompt = projects[selectedSessionLocation.projectIndex].sessions[selectedSessionLocation.sessionIndex].lastPrompt
+        else {
+            return
+        }
+
+        draftPrompt = lastPrompt
+        sendPrompt(text: lastPrompt)
     }
 
     private func apply(
@@ -129,15 +213,90 @@ struct ContentView: View {
         case .threadStarted(let threadID):
             projects[projectIndex].sessions[sessionIndex].threadID = threadID
         case .agentMessage(let text):
-            projects[projectIndex].sessions[sessionIndex].messages.append(
-                ChatMessage(role: .codex, text: text)
-            )
+            projects[projectIndex].sessions[sessionIndex].messages.append(ChatMessage(role: .codex, text: text))
+        case .commandStarted(let text):
+            projects[projectIndex].sessions[sessionIndex].lastCommand = text
+            projects[projectIndex].sessions[sessionIndex].messages.append(ChatMessage(role: .system, text: text))
+        case .terminalEvent(let event):
+            appendTerminalEvent(event, toProjectID: projectID)
         case .failed(let summary):
             projects[projectIndex].sessions[sessionIndex].status = .failed
             projects[projectIndex].sessions[sessionIndex].failureSummary = summary
-            projects[projectIndex].sessions[sessionIndex].messages.append(
-                ChatMessage(role: .system, text: summary)
+            projects[projectIndex].sessions[sessionIndex].messages.append(ChatMessage(role: .system, text: summary))
+            appendTerminalEvent(
+                TerminalEvent(
+                    sessionID: sessionID,
+                    stream: .stderr,
+                    text: summary,
+                    parsedEventType: "session.failed"
+                ),
+                toProjectID: projectID
             )
+        }
+    }
+
+    private func appendTerminalEvent(_ event: TerminalEvent, toProjectID projectID: CodexProject.ID) {
+        guard
+            let projectIndex = projects.firstIndex(where: { $0.id == projectID }),
+            let sessionIndex = projects[projectIndex].sessions.firstIndex(where: { $0.id == event.sessionID })
+        else {
+            return
+        }
+
+        projects[projectIndex].sessions[sessionIndex].terminalEvents.append(event)
+        if projects[projectIndex].sessions[sessionIndex].terminalEvents.count > 400 {
+            let overflow = projects[projectIndex].sessions[sessionIndex].terminalEvents.count - 400
+            projects[projectIndex].sessions[sessionIndex].terminalEvents.removeFirst(overflow)
+        }
+    }
+
+    private func toggleProjectExpansion(_ projectID: CodexProject.ID) {
+        if expandedProjectIDs.contains(projectID) {
+            expandedProjectIDs.remove(projectID)
+        } else {
+            expandedProjectIDs.insert(projectID)
+        }
+    }
+
+    private func selectSession(projectID: CodexProject.ID, sessionID: CodexSession.ID) {
+        expandedProjectIDs.insert(projectID)
+        selectedSessionID = sessionID
+    }
+
+    private func createSession(projectID: CodexProject.ID) {
+        guard let projectIndex = projects.firstIndex(where: { $0.id == projectID }) else {
+            return
+        }
+
+        let session = CodexSession()
+        projects[projectIndex].sessions.insert(session, at: 0)
+        expandedProjectIDs.insert(projectID)
+        selectedSessionID = session.id
+        draftPrompt = ""
+    }
+
+    private func syncSidebarState(with projects: [CodexProject]) {
+        let availableProjectIDs = Set(projects.map(\.id))
+        expandedProjectIDs = expandedProjectIDs.intersection(availableProjectIDs)
+
+        if expandedProjectIDs.isEmpty, let firstProject = projects.first {
+            expandedProjectIDs.insert(firstProject.id)
+        }
+
+        if
+            let selectedSessionID,
+            projects.contains(where: { project in project.sessions.contains(where: { $0.id == selectedSessionID }) })
+        {
+            return
+        }
+
+        if let firstExistingSession = projects.lazy.flatMap(\.sessions).first {
+            selectedSessionID = firstExistingSession.id
+            if let parentProject = projects.first(where: { project in project.sessions.contains(where: { $0.id == firstExistingSession.id }) }) {
+                expandedProjectIDs.insert(parentProject.id)
+            }
+        } else {
+            selectedSessionID = nil
         }
     }
 }
