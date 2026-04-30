@@ -16,26 +16,37 @@ struct ProjectChatView: View {
     @ObservedObject var terminalStore: SessionTerminalStore
     @Binding var draftPrompt: String
     let sendPrompt: () -> Void
+    @State private var showsTerminalSidebar = true
 
     var body: some View {
         GeometryReader { geometry in
             if geometry.size.width >= 900 {
-                HSplitView {
-                    chatColumn
-                        .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
+                if showsTerminalSidebar {
+                    HSplitView {
+                        chatColumn
+                            .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
 
-                    terminalColumn
-                        .frame(minWidth: 260, idealWidth: 320, maxWidth: 400)
+                        terminalColumn
+                            .frame(minWidth: 260, idealWidth: 320, maxWidth: 400)
+                    }
+                } else {
+                    chatColumn
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
-                VStack(spacing: 0) {
+                if showsTerminalSidebar {
+                    VStack(spacing: 0) {
+                        chatColumn
+
+                        Divider()
+
+                        terminalColumn
+                            .frame(maxWidth: .infinity)
+                            .frame(height: min(320, max(220, geometry.size.height * 0.35)))
+                    }
+                } else {
                     chatColumn
-
-                    Divider()
-
-                    terminalColumn
-                        .frame(maxWidth: .infinity)
-                        .frame(height: min(320, max(220, geometry.size.height * 0.35)))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
@@ -48,6 +59,19 @@ struct ProjectChatView: View {
                 } label: {
                     Label("Finder", systemImage: "folder")
                 }
+                .buttonStyle(PressableButtonStyle())
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        showsTerminalSidebar.toggle()
+                    }
+                } label: {
+                    Label(
+                        showsTerminalSidebar ? "Hide Terminal" : "Show Terminal",
+                        systemImage: showsTerminalSidebar ? "sidebar.right" : "sidebar.right"
+                    )
+                }
+                .buttonStyle(PressableButtonStyle())
 
                 Menu {
                     Button("Cursor") { openApp("Cursor", project: project) }
@@ -63,6 +87,7 @@ struct ProjectChatView: View {
                 } label: {
                     Label("Commit", systemImage: "checkmark.seal")
                 }
+                .buttonStyle(PressableButtonStyle())
 
                 Button {
                 } label: {
@@ -101,9 +126,6 @@ struct ProjectChatView: View {
         )
 
         return TerminalMonitorSidebar(
-            project: project,
-            session: session,
-            workspace: workspace,
             terminalController: terminalController
         )
     }
@@ -145,7 +167,7 @@ private struct NewSessionContent: View {
             Text("What should Codex do in \(project.name)?")
                 .font(.largeTitle.weight(.semibold))
                 .multilineTextAlignment(.center)
-            Text("This session is idle. Your first message creates an isolated workspace, launches Codex there, and keeps the thread resumable.")
+            Text(sessionIntro)
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -158,6 +180,15 @@ private struct NewSessionContent: View {
         }
         .padding(48)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var sessionIntro: String {
+        switch project.workspaceMode {
+        case .isolated:
+            return "This session is idle. Your first message creates a dedicated worktree and branch for this chat, launches Codex there, and keeps the thread resumable."
+        case .shared:
+            return "This session is idle. Your first message reuses the project root branch and worktree, launches Codex there, and keeps the thread resumable. LiquidCoder blocks concurrent shared runs so chats do not stomp each other."
+        }
     }
 }
 
@@ -281,6 +312,7 @@ private struct PromptComposer: View {
     let isSessionActive: Bool
     @Binding var draftPrompt: String
     let sendPrompt: () -> Void
+    @State private var sendHovered = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -293,7 +325,7 @@ private struct PromptComposer: View {
                     .padding(.top, 8)
 
                 if draftPrompt.isEmpty {
-                    Text("Ask Codex anything. The first prompt creates an isolated worktree for this session.")
+                    Text(promptPlaceholder)
                         .foregroundStyle(.secondary.opacity(0.6))
                         .padding(.horizontal, 18)
                         .padding(.top, 17)
@@ -315,6 +347,7 @@ private struct PromptComposer: View {
                 Spacer()
 
                 Label(project.name, systemImage: "folder")
+                Label(project.workspaceMode.label, systemImage: project.workspaceMode == .shared ? "square.3.layers.3d.down.right" : "square.split.2x2")
                 if let workspace {
                     Label(workspace.branchName, systemImage: "arrow.triangle.branch")
                 } else {
@@ -322,14 +355,21 @@ private struct PromptComposer: View {
                 }
 
                 Button(action: sendPrompt) {
-                    Image(systemName: "arrow.up")
+                    Image(systemName: promptIsEmpty ? "arrow.up" : "arrow.up.circle.fill")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 30, height: 30)
                         .background(sendButtonColor, in: Circle())
+                        .scaleEffect(sendHovered && !promptIsEmpty ? 1.06 : 1)
+                        .contentTransition(.symbolEffect(.replace))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressablePlainButtonStyle(pressedScale: 0.9))
                 .disabled(promptIsEmpty)
+                .onHover { isHovering in
+                    withAnimation(.easeInOut(duration: 0.14)) {
+                        sendHovered = isHovering
+                    }
+                }
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
@@ -338,10 +378,21 @@ private struct PromptComposer: View {
         }
         .glassEffect(.regular.tint(.white.opacity(0.20)).interactive(), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .frame(maxWidth: 760)
+        .animation(.easeInOut(duration: 0.16), value: promptIsEmpty)
+        .animation(.spring(response: 0.24, dampingFraction: 0.72), value: isSessionActive)
     }
 
     private var promptIsEmpty: Bool {
         draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSessionActive
+    }
+
+    private var promptPlaceholder: String {
+        switch project.workspaceMode {
+        case .isolated:
+            return "Ask Codex anything. The first prompt creates a dedicated worktree and branch for this chat."
+        case .shared:
+            return "Ask Codex anything. The first prompt reuses the project root branch and worktree for this chat."
+        }
     }
 
     private var sendButtonColor: Color {
@@ -350,77 +401,16 @@ private struct PromptComposer: View {
 }
 
 private struct TerminalMonitorSidebar: View {
-    let project: CodexProject
-    let session: CodexSession
-    let workspace: CodexWorkspace?
     @ObservedObject var terminalController: SessionTerminalController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Terminal")
-                    .font(.headline.weight(.semibold))
-
-                Spacer()
-
-                SessionStatusBadge(status: session.status)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                DetailRow(label: "Project", value: project.name)
-                DetailRow(label: "Root", value: project.rootPath)
-                if let workspace {
-                    DetailRow(label: "Branch", value: workspace.branchName)
-                    DetailRow(label: "Worktree", value: workspace.worktreePath)
-                }
-                if let threadID = session.threadID {
-                    DetailRow(label: "Thread", value: threadID)
-                }
-                DetailRow(
-                    label: terminalController.currentDirectory == nil ? "Shell Root" : "Shell CWD",
-                    value: terminalController.currentDirectory ?? terminalController.workingDirectory
-                )
-            }
-
-            HStack {
-                Text(terminalController.terminalTitle)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                if let lastExitCode = terminalController.lastExitCode {
-                    Text("exit \(lastExitCode)")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-
+        VStack(spacing: 0) {
             IntegratedTerminalView(controller: terminalController)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .padding(20)
         .background(.bar)
-    }
-}
-
-private struct DetailRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(2)
-                .truncationMode(.middle)
-        }
     }
 }
 

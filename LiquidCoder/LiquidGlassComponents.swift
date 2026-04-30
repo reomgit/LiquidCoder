@@ -48,3 +48,27 @@ struct ToolButton: View {
             .frame(height: 30)
     }
 }
+
+struct PressableButtonStyle: ButtonStyle {
+    var pressedScale: CGFloat = 0.96
+    var pressedOpacity: Double = 0.9
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? pressedScale : 1)
+            .opacity(configuration.isPressed ? pressedOpacity : 1)
+            .animation(.spring(response: 0.2, dampingFraction: 0.68), value: configuration.isPressed)
+    }
+}
+
+struct PressablePlainButtonStyle: ButtonStyle {
+    var pressedScale: CGFloat = 0.96
+    var pressedOpacity: Double = 0.9
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? pressedScale : 1)
+            .opacity(configuration.isPressed ? pressedOpacity : 1)
+            .animation(.spring(response: 0.2, dampingFraction: 0.68), value: configuration.isPressed)
+    }
+}

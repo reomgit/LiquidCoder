@@ -62,6 +62,9 @@ final class CodexRuntime: ObservableObject {
 
     private struct RunningSession {
         let projectID: CodexProject.ID
+        let sessionTitle: String
+        let workspaceID: CodexWorkspace.ID
+        let workspaceScope: CodexWorkspaceScope
         let process: Process
         let reader: PTYReader
         let masterHandle: FileHandle
@@ -179,6 +182,12 @@ final class CodexRuntime: ObservableObject {
         }
 
         do {
+            if let conflictMessage = sharedWorkspaceConflict(context: context) {
+                onEvent(.failed(conflictMessage))
+                releaseSecurityScope(for: context)
+                return
+            }
+
             let launch = try makeLaunchHandles()
             let process = Process()
             process.executableURL = URL(fileURLWithPath: Self.bundledShellPath)
@@ -222,6 +231,9 @@ final class CodexRuntime: ObservableObject {
 
             runningSessions[sessionID] = RunningSession(
                 projectID: context.projectID,
+                sessionTitle: session.title,
+                workspaceID: context.workspace.id,
+                workspaceScope: context.workspace.scope,
                 process: process,
                 reader: reader,
                 masterHandle: launch.masterHandle,
@@ -253,6 +265,23 @@ final class CodexRuntime: ObservableObject {
             releaseSecurityScope(for: context)
             onEvent(.failed("LiquidCoder failed to launch the session process. \(error.localizedDescription)"))
         }
+    }
+
+    private func sharedWorkspaceConflict(context: PreparedSessionContext) -> String? {
+        guard context.workspace.scope == .shared else {
+            return nil
+        }
+
+        guard let active = runningSessions.values.first(where: {
+            $0.projectID == context.projectID
+                && $0.workspaceScope == .shared
+                && $0.workspaceID == context.workspace.id
+                && $0.process.isRunning
+        }) else {
+            return nil
+        }
+
+        return "Shared mode reuses one branch and one worktree for this project. `\(active.sessionTitle)` is already running there. Stop that session or switch the project back to Isolated mode before launching another chat."
     }
 
     private func resolveExecutableURL(named executable: String) -> URL? {

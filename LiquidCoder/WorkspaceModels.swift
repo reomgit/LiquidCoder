@@ -13,6 +13,7 @@ struct CodexProject: Codable, Identifiable, Hashable {
     var rootPath: String
     var bookmarkData: Data?
     var branch: String
+    var workspaceMode: ProjectWorkspaceMode
     var sessions: [CodexSession]
     var workspaces: [CodexWorkspace]
 
@@ -22,6 +23,7 @@ struct CodexProject: Codable, Identifiable, Hashable {
         rootPath: String,
         bookmarkData: Data? = nil,
         branch: String = "unknown",
+        workspaceMode: ProjectWorkspaceMode = .isolated,
         sessions: [CodexSession] = [],
         workspaces: [CodexWorkspace] = []
     ) {
@@ -30,6 +32,7 @@ struct CodexProject: Codable, Identifiable, Hashable {
         self.rootPath = rootPath
         self.bookmarkData = bookmarkData
         self.branch = branch
+        self.workspaceMode = workspaceMode
         self.sessions = sessions
         self.workspaces = workspaces
     }
@@ -72,12 +75,17 @@ struct CodexProject: Codable, Identifiable, Hashable {
         }
     }
 
+    var sharedWorkspace: CodexWorkspace? {
+        workspaces.first { $0.scope == .shared && !$0.isArchived }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id
         case name
         case rootPath
         case bookmarkData
         case branch
+        case workspaceMode
         case sessions
         case workspaces
     }
@@ -89,15 +97,45 @@ struct CodexProject: Codable, Identifiable, Hashable {
         rootPath = try container.decode(String.self, forKey: .rootPath)
         bookmarkData = try container.decodeIfPresent(Data.self, forKey: .bookmarkData)
         branch = try container.decodeIfPresent(String.self, forKey: .branch) ?? "unknown"
+        workspaceMode = try container.decodeIfPresent(ProjectWorkspaceMode.self, forKey: .workspaceMode) ?? .isolated
         sessions = try container.decodeIfPresent([CodexSession].self, forKey: .sessions) ?? []
         workspaces = try container.decodeIfPresent([CodexWorkspace].self, forKey: .workspaces) ?? []
     }
 }
 
+enum ProjectWorkspaceMode: String, Codable, Hashable, CaseIterable {
+    case isolated
+    case shared
+
+    var label: String {
+        switch self {
+        case .isolated:
+            return "Isolated"
+        case .shared:
+            return "Shared"
+        }
+    }
+
+    var shortDescription: String {
+        switch self {
+        case .isolated:
+            return "One chat per worktree and branch."
+        case .shared:
+            return "Many chats reuse one branch and worktree."
+        }
+    }
+}
+
+enum CodexWorkspaceScope: String, Codable, Hashable {
+    case isolated
+    case shared
+}
+
 struct CodexWorkspace: Codable, Identifiable, Hashable {
     var id: UUID
     var projectID: CodexProject.ID
-    var sessionID: CodexSession.ID
+    var sessionID: CodexSession.ID?
+    var scope: CodexWorkspaceScope
     var branchName: String
     var worktreePath: String
     var baseRef: String
@@ -107,7 +145,8 @@ struct CodexWorkspace: Codable, Identifiable, Hashable {
     init(
         id: UUID = UUID(),
         projectID: CodexProject.ID,
-        sessionID: CodexSession.ID,
+        sessionID: CodexSession.ID? = nil,
+        scope: CodexWorkspaceScope,
         branchName: String,
         worktreePath: String,
         baseRef: String,
@@ -117,6 +156,7 @@ struct CodexWorkspace: Codable, Identifiable, Hashable {
         self.id = id
         self.projectID = projectID
         self.sessionID = sessionID
+        self.scope = scope
         self.branchName = branchName
         self.worktreePath = worktreePath
         self.baseRef = baseRef
@@ -126,6 +166,41 @@ struct CodexWorkspace: Codable, Identifiable, Hashable {
 
     var worktreeURL: URL {
         URL(fileURLWithPath: worktreePath)
+    }
+
+    var displayMode: String {
+        switch scope {
+        case .isolated:
+            return "Isolated"
+        case .shared:
+            return "Shared"
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case projectID
+        case sessionID
+        case scope
+        case branchName
+        case worktreePath
+        case baseRef
+        case isArchived
+        case createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        projectID = try container.decode(CodexProject.ID.self, forKey: .projectID)
+        sessionID = try container.decodeIfPresent(CodexSession.ID.self, forKey: .sessionID)
+        scope = try container.decodeIfPresent(CodexWorkspaceScope.self, forKey: .scope)
+            ?? (sessionID == nil ? .shared : .isolated)
+        branchName = try container.decode(String.self, forKey: .branchName)
+        worktreePath = try container.decode(String.self, forKey: .worktreePath)
+        baseRef = try container.decode(String.self, forKey: .baseRef)
+        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
     }
 }
 
