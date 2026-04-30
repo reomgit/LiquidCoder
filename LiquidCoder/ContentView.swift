@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var expandedProjectIDs: Set<CodexProject.ID> = []
     @State private var draftPrompt = ""
     @StateObject private var runtime = CodexRuntime()
+    @StateObject private var terminalStore = SessionTerminalStore()
 
     private var selectedSessionLocation: (projectIndex: Int, sessionIndex: Int)? {
         guard let selectedSessionID else {
@@ -53,6 +54,7 @@ struct ContentView: View {
                     session: sessionBinding,
                     workspace: project.workspace(id: session.workspaceID),
                     runtime: runtime,
+                    terminalStore: terminalStore,
                     draftPrompt: $draftPrompt,
                     sendPrompt: sendPrompt,
                     stopSession: stopSelectedSession,
@@ -64,7 +66,7 @@ struct ContentView: View {
                 EmptySessionView()
             }
         }
-        .frame(minWidth: 1080, minHeight: 700)
+        .frame(minWidth: 880, minHeight: 700)
         .onAppear {
             syncSidebarState(with: projects)
         }

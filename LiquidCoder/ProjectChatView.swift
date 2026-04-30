@@ -13,41 +13,33 @@ struct ProjectChatView: View {
     @Binding var session: CodexSession
     let workspace: CodexWorkspace?
     @ObservedObject var runtime: CodexRuntime
+    @ObservedObject var terminalStore: SessionTerminalStore
     @Binding var draftPrompt: String
     let sendPrompt: () -> Void
     let stopSession: () -> Void
     let rerunLastPrompt: () -> Void
 
     var body: some View {
-        HSplitView {
-            VStack(spacing: 0) {
-                if session.messages.isEmpty && session.terminalEvents.isEmpty && session.failureSummary == nil {
-                    NewSessionContent(project: project)
-                } else {
-                    SessionContent(project: project, session: session)
+        GeometryReader { geometry in
+            if geometry.size.width >= 900 {
+                HSplitView {
+                    chatColumn
+                        .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
+
+                    terminalColumn
+                        .frame(minWidth: 260, idealWidth: 320, maxWidth: 400)
                 }
+            } else {
+                VStack(spacing: 0) {
+                    chatColumn
 
-                PromptComposer(
-                    project: project,
-                    workspace: workspace,
-                    isSessionActive: runtime.hasActiveSession(for: session.id),
-                    draftPrompt: $draftPrompt,
-                    sendPrompt: sendPrompt
-                )
-                .padding(.horizontal, 32)
-                .padding(.bottom, 24)
+                    Divider()
+
+                    terminalColumn
+                        .frame(maxWidth: .infinity)
+                        .frame(height: min(320, max(220, geometry.size.height * 0.35)))
+                }
             }
-            .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
-
-            TerminalMonitorSidebar(
-                project: project,
-                session: session,
-                workspace: workspace,
-                isSessionActive: runtime.hasActiveSession(for: session.id),
-                stopSession: stopSession,
-                rerunLastPrompt: rerunLastPrompt
-            )
-            .frame(minWidth: 320, idealWidth: 360, maxWidth: 420)
         }
         .background(.background)
         .navigationTitle(project.name)
@@ -81,6 +73,44 @@ struct ProjectChatView: View {
                 .buttonStyle(.glassProminent)
             }
         }
+    }
+
+    private var chatColumn: some View {
+        VStack(spacing: 0) {
+            if session.messages.isEmpty && session.terminalEvents.isEmpty && session.failureSummary == nil {
+                NewSessionContent(project: project)
+            } else {
+                SessionContent(project: project, session: session)
+            }
+
+            PromptComposer(
+                project: project,
+                workspace: workspace,
+                isSessionActive: runtime.hasActiveSession(for: session.id),
+                draftPrompt: $draftPrompt,
+                sendPrompt: sendPrompt
+            )
+            .padding(.horizontal, 24)
+            .padding(.bottom, 20)
+        }
+    }
+
+    private var terminalColumn: some View {
+        let terminalController = terminalStore.controller(
+            for: session.id,
+            project: project,
+            workspace: workspace
+        )
+
+        return TerminalMonitorSidebar(
+            project: project,
+            session: session,
+            workspace: workspace,
+            terminalController: terminalController,
+            isSessionActive: runtime.hasActiveSession(for: session.id),
+            stopSession: stopSession,
+            rerunLastPrompt: rerunLastPrompt
+        )
     }
 }
 
@@ -328,6 +358,7 @@ private struct TerminalMonitorSidebar: View {
     let project: CodexProject
     let session: CodexSession
     let workspace: CodexWorkspace?
+    @ObservedObject var terminalController: SessionTerminalController
     let isSessionActive: Bool
     let stopSession: () -> Void
     let rerunLastPrompt: () -> Void
@@ -353,6 +384,10 @@ private struct TerminalMonitorSidebar: View {
                 if let threadID = session.threadID {
                     DetailRow(label: "Thread", value: threadID)
                 }
+                DetailRow(
+                    label: terminalController.currentDirectory == nil ? "Shell Root" : "Shell CWD",
+                    value: terminalController.currentDirectory ?? terminalController.workingDirectory
+                )
             }
 
             if let lastCommand = session.lastCommand {
@@ -378,36 +413,30 @@ private struct TerminalMonitorSidebar: View {
                     .disabled(!isSessionActive)
                 Button("Rerun", action: rerunLastPrompt)
                     .disabled(isSessionActive || session.lastPrompt == nil)
-                Button("Copy Output") {
-                    copyToPasteboard(session.terminalEvents.map(\.text).joined(separator: "\n"))
+                Button(terminalController.isRunning ? "Shell Active" : "Start Shell") {
+                    terminalController.relaunch()
                 }
-                .disabled(session.terminalEvents.isEmpty)
+                .disabled(terminalController.isRunning)
             }
             .buttonStyle(.glass)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Recent Output")
+            HStack {
+                Text(terminalController.terminalTitle)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
 
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        if session.terminalEvents.isEmpty {
-                            Text("No terminal output yet. LiquidCoder will stream the Codex CLI transcript here.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        } else {
-                            ForEach(session.terminalEvents.suffix(120)) { event in
-                                TerminalEventRow(event: event)
-                            }
-                        }
-                    }
+                Spacer()
+
+                if let lastExitCode = terminalController.lastExitCode {
+                    Text("exit \(lastExitCode)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(10)
-                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
+
+            IntegratedTerminalView(controller: terminalController)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .padding(20)
         .background(.bar)
@@ -431,75 +460,6 @@ private struct DetailRow: View {
                 .truncationMode(.middle)
         }
     }
-}
-
-private struct TerminalEventRow: View {
-    let event: TerminalEvent
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Label(streamLabel, systemImage: streamIcon)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(streamColor)
-
-                Spacer()
-
-                Text(event.createdAt, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text(event.text)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(8)
-        .background(streamColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private var streamLabel: String {
-        switch event.stream {
-        case .stdout:
-            return "stdout"
-        case .stderr:
-            return "stderr"
-        case .system:
-            return "system"
-        }
-    }
-
-    private var streamIcon: String {
-        switch event.stream {
-        case .stdout:
-            return "terminal"
-        case .stderr:
-            return "exclamationmark.triangle"
-        case .system:
-            return "gearshape"
-        }
-    }
-
-    private var streamColor: Color {
-        switch event.stream {
-        case .stdout:
-            return .secondary
-        case .stderr:
-            return .red
-        case .system:
-            return .blue
-        }
-    }
-}
-
-private func copyToPasteboard(_ text: String) {
-    guard !text.isEmpty else {
-        return
-    }
-
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(text, forType: .string)
 }
 
 private func openInFinder(_ project: CodexProject) {

@@ -260,7 +260,7 @@ final class CodexRuntime: ObservableObject {
 
         if executable == "codex",
            let explicitPath = environment["CODEX_CLI_PATH"],
-           FileManager.default.isExecutableFile(atPath: explicitPath) {
+           canExecute(path: explicitPath) {
             return URL(fileURLWithPath: explicitPath)
         }
 
@@ -271,12 +271,59 @@ final class CodexRuntime: ObservableObject {
 
         for directory in candidates {
             let path = URL(fileURLWithPath: directory).appendingPathComponent(executable).path
-            if FileManager.default.isExecutableFile(atPath: path) {
+            if canExecute(path: path) {
                 return URL(fileURLWithPath: path)
             }
         }
 
+        if let shellResolvedPath = resolveExecutableURLUsingLoginShell(named: executable) {
+            return shellResolvedPath
+        }
+
         return nil
+    }
+
+    private func canExecute(path: String) -> Bool {
+        FileManager.default.isExecutableFile(atPath: path)
+            || access(path, X_OK) == 0
+    }
+
+    private func resolveExecutableURLUsingLoginShell(named executable: String) -> URL? {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+
+        process.executableURL = URL(fileURLWithPath: Self.bundledShellPath)
+        process.arguments = ["-lic", "command -v -- \(shellQuoted(executable))"]
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+
+        let output = String(
+            data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let output, !output.isEmpty else {
+            return nil
+        }
+
+        return URL(fileURLWithPath: output)
+    }
+
+    private func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func launchEnvironment(
