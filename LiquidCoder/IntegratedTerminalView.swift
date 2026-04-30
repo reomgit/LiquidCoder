@@ -72,13 +72,12 @@ final class SessionTerminalController: NSObject, ObservableObject, LocalProcessT
         terminalView.processDelegate = self
 
         securityScopeActive = projectRootURL.startAccessingSecurityScopedResource()
-        let shell = Self.userShellPath()
-        let execName = "-" + URL(fileURLWithPath: shell).lastPathComponent
+        let shellLaunch = Self.shellLaunchConfiguration(workingDirectory: workingDirectory)
         terminalView.startProcess(
-            executable: shell,
-            args: [],
-            environment: Self.shellEnvironment(workingDirectory: workingDirectory),
-            execName: execName,
+            executable: shellLaunch.executable,
+            args: shellLaunch.arguments,
+            environment: shellLaunch.environment,
+            execName: shellLaunch.execName,
             currentDirectory: workingDirectory
         )
 
@@ -154,6 +153,35 @@ final class SessionTerminalController: NSObject, ObservableObject, LocalProcessT
         securityScopeActive = false
     }
 
+    private static func shellLaunchConfiguration(workingDirectory: String) -> ShellLaunchConfiguration {
+        let shell = userShellPath()
+        let shellName = URL(fileURLWithPath: shell).lastPathComponent
+
+        switch shellName {
+        case "zsh", "bash", "sh", "ksh":
+            return ShellLaunchConfiguration(
+                executable: shell,
+                arguments: ["-il"],
+                execName: nil,
+                environment: shellEnvironment(shell: shell, workingDirectory: workingDirectory)
+            )
+        case "fish":
+            return ShellLaunchConfiguration(
+                executable: shell,
+                arguments: ["-l"],
+                execName: nil,
+                environment: shellEnvironment(shell: shell, workingDirectory: workingDirectory)
+            )
+        default:
+            return ShellLaunchConfiguration(
+                executable: shell,
+                arguments: [],
+                execName: "-" + shellName,
+                environment: shellEnvironment(shell: shell, workingDirectory: workingDirectory)
+            )
+        }
+    }
+
     private static func userShellPath() -> String {
         let environmentShell = ProcessInfo.processInfo.environment["SHELL"]
         if let environmentShell, FileManager.default.isExecutableFile(atPath: environmentShell) {
@@ -184,15 +212,43 @@ final class SessionTerminalController: NSObject, ObservableObject, LocalProcessT
         return FileManager.default.isExecutableFile(atPath: shell) ? shell : "/bin/zsh"
     }
 
-    private static func shellEnvironment(workingDirectory: String) -> [String] {
-        var environment = ProcessInfo.processInfo.environment
+    private static func shellEnvironment(shell: String, workingDirectory: String) -> [String] {
+        let processEnvironment = ProcessInfo.processInfo.environment
+        var environment: [String: String] = [:]
+
+        environment["HOME"] = processEnvironment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+        environment["USER"] = processEnvironment["USER"] ?? NSUserName()
+        environment["LOGNAME"] = processEnvironment["LOGNAME"] ?? environment["USER"]
+        environment["SHELL"] = shell
+        environment["PATH"] = processEnvironment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         environment["TERM"] = "xterm-256color"
         environment["COLORTERM"] = "truecolor"
         environment["TERM_PROGRAM"] = "LiquidCoder"
+        environment["TERM_PROGRAM_VERSION"] = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
         environment["PWD"] = workingDirectory
+
+        for key in [
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "__CF_USER_TEXT_ENCODING",
+            "SSH_AUTH_SOCK"
+        ] {
+            if let value = processEnvironment[key], !value.isEmpty {
+                environment[key] = value
+            }
+        }
 
         return environment.map { "\($0.key)=\($0.value)" }
     }
+}
+
+private struct ShellLaunchConfiguration {
+    let executable: String
+    let arguments: [String]
+    let execName: String?
+    let environment: [String]
 }
 
 struct IntegratedTerminalView: NSViewRepresentable {

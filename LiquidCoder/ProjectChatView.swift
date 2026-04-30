@@ -16,8 +16,6 @@ struct ProjectChatView: View {
     @ObservedObject var terminalStore: SessionTerminalStore
     @Binding var draftPrompt: String
     let sendPrompt: () -> Void
-    let stopSession: () -> Void
-    let rerunLastPrompt: () -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -106,10 +104,7 @@ struct ProjectChatView: View {
             project: project,
             session: session,
             workspace: workspace,
-            terminalController: terminalController,
-            isSessionActive: runtime.hasActiveSession(for: session.id),
-            stopSession: stopSession,
-            rerunLastPrompt: rerunLastPrompt
+            terminalController: terminalController
         )
     }
 }
@@ -359,9 +354,6 @@ private struct TerminalMonitorSidebar: View {
     let session: CodexSession
     let workspace: CodexWorkspace?
     @ObservedObject var terminalController: SessionTerminalController
-    let isSessionActive: Bool
-    let stopSession: () -> Void
-    let rerunLastPrompt: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -389,36 +381,6 @@ private struct TerminalMonitorSidebar: View {
                     value: terminalController.currentDirectory ?? terminalController.workingDirectory
                 )
             }
-
-            if let lastCommand = session.lastCommand {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Last Command")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-
-                    ScrollView {
-                        Text(lastCommand)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 90)
-                    .padding(10)
-                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-            }
-
-            HStack(spacing: 10) {
-                Button("Stop", action: stopSession)
-                    .disabled(!isSessionActive)
-                Button("Rerun", action: rerunLastPrompt)
-                    .disabled(isSessionActive || session.lastPrompt == nil)
-                Button(terminalController.isRunning ? "Shell Active" : "Start Shell") {
-                    terminalController.relaunch()
-                }
-                .disabled(terminalController.isRunning)
-            }
-            .buttonStyle(.glass)
 
             HStack {
                 Text(terminalController.terminalTitle)

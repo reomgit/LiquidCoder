@@ -56,9 +56,7 @@ struct ContentView: View {
                     runtime: runtime,
                     terminalStore: terminalStore,
                     draftPrompt: $draftPrompt,
-                    sendPrompt: sendPrompt,
-                    stopSession: stopSelectedSession,
-                    rerunLastPrompt: rerunLastPrompt
+                    sendPrompt: sendPrompt
                 )
             } else if projects.isEmpty {
                 EmptyProjectView(addProject: addProject)
@@ -174,26 +172,6 @@ struct ContentView: View {
         }
     }
 
-    private func stopSelectedSession() {
-        guard let selectedSessionID else {
-            return
-        }
-
-        runtime.stopSession(selectedSessionID)
-    }
-
-    private func rerunLastPrompt() {
-        guard
-            let selectedSessionLocation,
-            let lastPrompt = projects[selectedSessionLocation.projectIndex].sessions[selectedSessionLocation.sessionIndex].lastPrompt
-        else {
-            return
-        }
-
-        draftPrompt = lastPrompt
-        sendPrompt(text: lastPrompt)
-    }
-
     private func apply(
         _ event: CodexRuntime.SessionEvent,
         sessionID: CodexSession.ID,
@@ -218,7 +196,6 @@ struct ContentView: View {
             projects[projectIndex].sessions[sessionIndex].messages.append(ChatMessage(role: .codex, text: text))
         case .commandStarted(let text):
             projects[projectIndex].sessions[sessionIndex].lastCommand = text
-            projects[projectIndex].sessions[sessionIndex].messages.append(ChatMessage(role: .system, text: text))
         case .terminalEvent(let event):
             appendTerminalEvent(event, toProjectID: projectID)
         case .failed(let summary):
