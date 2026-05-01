@@ -85,7 +85,8 @@ final class AppState: ObservableObject {
         let project = CodexProject(
             name: url.lastPathComponent,
             rootPath: url.path,
-            bookmarkData: bookmarkData
+            bookmarkData: bookmarkData,
+            branch: branchName(for: url, bookmarkData: bookmarkData) ?? "unknown"
         )
         projects.append(project)
         return .added(projectID: project.id)
@@ -107,6 +108,17 @@ final class AppState: ObservableObject {
         }
 
         projects[projectIndex].workspaceMode = mode
+    }
+
+    func refreshProjectBranches() {
+        for projectIndex in projects.indices {
+            guard let branch = branchName(for: projects[projectIndex]) else {
+                continue
+            }
+            if projects[projectIndex].branch != branch {
+                projects[projectIndex].branch = branch
+            }
+        }
     }
 
     func markSessionStarting(sessionID: CodexSession.ID, prompt: String) -> (project: CodexProject, session: CodexSession)? {
@@ -209,5 +221,70 @@ final class AppState: ObservableObject {
             let overflow = projects[projectIndex].sessions[sessionIndex].terminalEvents.count - 400
             projects[projectIndex].sessions[sessionIndex].terminalEvents.removeFirst(overflow)
         }
+    }
+
+    private func branchName(for project: CodexProject) -> String? {
+        branchName(for: project.resolvedRootURL, bookmarkData: project.bookmarkData)
+    }
+
+    private func branchName(for url: URL, bookmarkData: Data?) -> String? {
+        let resolvedURL: URL
+        if let bookmarkData {
+            var isStale = false
+            resolvedURL = (try? URL(
+                resolvingBookmarkData: bookmarkData,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )) ?? url
+        } else {
+            resolvedURL = url
+        }
+
+        let didAccessSecurityScope = resolvedURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccessSecurityScope {
+                resolvedURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let branch = runGit(arguments: ["branch", "--show-current"], at: resolvedURL)
+        if branch.exitCode == 0 {
+            let value = branch.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                return value
+            }
+        }
+
+        let detached = runGit(arguments: ["rev-parse", "--short", "HEAD"], at: resolvedURL)
+        if detached.exitCode == 0 {
+            let value = detached.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                return value
+            }
+        }
+
+        return nil
+    }
+
+    private func runGit(arguments: [String], at rootURL: URL) -> (exitCode: Int32, stdout: String) {
+        let process = Process()
+        let stdoutPipe = Pipe()
+
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.currentDirectoryURL = rootURL
+        process.standardOutput = stdoutPipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return (-1, "")
+        }
+
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return (process.terminationStatus, stdout)
     }
 }

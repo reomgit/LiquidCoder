@@ -30,8 +30,7 @@ struct ContentView: View {
                 addProject: addProject,
                 toggleProjectExpansion: toggleProjectExpansion,
                 selectSession: selectSession,
-                createSession: createSession,
-                setProjectWorkspaceMode: setProjectWorkspaceMode
+                createSession: createSession
             )
             .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
         } detail: {
@@ -58,6 +57,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 880, minHeight: 700)
         .onAppear {
+            appState.refreshProjectBranches()
             syncSidebarState(with: appState.projects)
         }
         .onChange(of: appState.projects) { _, newValue in
@@ -182,10 +182,6 @@ struct ContentView: View {
         }
 
         createSession(projectID: firstProjectID)
-    }
-
-    private func setProjectWorkspaceMode(_ projectID: CodexProject.ID, _ mode: ProjectWorkspaceMode) {
-        appState.setProjectWorkspaceMode(mode, for: projectID)
     }
 
     private func syncSidebarState(with projects: [CodexProject]) {

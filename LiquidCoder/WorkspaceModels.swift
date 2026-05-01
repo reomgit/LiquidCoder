@@ -14,6 +14,7 @@ struct CodexProject: Codable, Identifiable, Hashable {
     var bookmarkData: Data?
     var branch: String
     var workspaceMode: ProjectWorkspaceMode
+    var permissionMode: CodexPermissionMode
     var sessions: [CodexSession]
     var workspaces: [CodexWorkspace]
 
@@ -24,6 +25,7 @@ struct CodexProject: Codable, Identifiable, Hashable {
         bookmarkData: Data? = nil,
         branch: String = "unknown",
         workspaceMode: ProjectWorkspaceMode = .isolated,
+        permissionMode: CodexPermissionMode = .defaultConfig,
         sessions: [CodexSession] = [],
         workspaces: [CodexWorkspace] = []
     ) {
@@ -33,6 +35,7 @@ struct CodexProject: Codable, Identifiable, Hashable {
         self.bookmarkData = bookmarkData
         self.branch = branch
         self.workspaceMode = workspaceMode
+        self.permissionMode = permissionMode
         self.sessions = sessions
         self.workspaces = workspaces
     }
@@ -86,6 +89,7 @@ struct CodexProject: Codable, Identifiable, Hashable {
         case bookmarkData
         case branch
         case workspaceMode
+        case permissionMode
         case sessions
         case workspaces
     }
@@ -98,8 +102,48 @@ struct CodexProject: Codable, Identifiable, Hashable {
         bookmarkData = try container.decodeIfPresent(Data.self, forKey: .bookmarkData)
         branch = try container.decodeIfPresent(String.self, forKey: .branch) ?? "unknown"
         workspaceMode = try container.decodeIfPresent(ProjectWorkspaceMode.self, forKey: .workspaceMode) ?? .isolated
+        permissionMode = try container.decodeIfPresent(CodexPermissionMode.self, forKey: .permissionMode) ?? .defaultConfig
         sessions = try container.decodeIfPresent([CodexSession].self, forKey: .sessions) ?? []
         workspaces = try container.decodeIfPresent([CodexWorkspace].self, forKey: .workspaces) ?? []
+    }
+}
+
+enum CodexPermissionMode: String, Codable, Hashable, CaseIterable {
+    case defaultConfig
+    case manualReview
+    case fullAccess
+
+    var label: String {
+        switch self {
+        case .defaultConfig:
+            return "Default"
+        case .manualReview:
+            return "Manual Review"
+        case .fullAccess:
+            return "Full Access"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .defaultConfig:
+            return "slider.horizontal.3"
+        case .manualReview:
+            return "checklist.checked"
+        case .fullAccess:
+            return "lock.open.trianglebadge.exclamationmark"
+        }
+    }
+
+    var shortDescription: String {
+        switch self {
+        case .defaultConfig:
+            return "Use the person's normal Codex defaults."
+        case .manualReview:
+            return "Ask before untrusted commands while keeping full disk access available."
+        case .fullAccess:
+            return "Run unsandboxed without approval prompts."
+        }
     }
 }
 

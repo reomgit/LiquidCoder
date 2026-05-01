@@ -15,7 +15,6 @@ struct SideView: View {
     let toggleProjectExpansion: (CodexProject.ID) -> Void
     let selectSession: (CodexProject.ID, CodexSession.ID) -> Void
     let createSession: (CodexProject.ID) -> Void
-    let setProjectWorkspaceMode: (CodexProject.ID, ProjectWorkspaceMode) -> Void
 
     var body: some View {
         List {
@@ -35,8 +34,7 @@ struct SideView: View {
                             isExpanded: expandedProjectIDs.contains(project.id),
                             toggleProjectExpansion: toggleProjectExpansion,
                             selectSession: selectSession,
-                            createSession: createSession,
-                            setProjectWorkspaceMode: setProjectWorkspaceMode
+                            createSession: createSession
                         )
                     }
                 }
@@ -64,7 +62,6 @@ private struct ProjectSidebarGroup: View {
     let toggleProjectExpansion: (CodexProject.ID) -> Void
     let selectSession: (CodexProject.ID, CodexSession.ID) -> Void
     let createSession: (CodexProject.ID) -> Void
-    let setProjectWorkspaceMode: (CodexProject.ID, ProjectWorkspaceMode) -> Void
     @State private var isProjectHovered = false
 
     var body: some View {
@@ -91,30 +88,6 @@ private struct ProjectSidebarGroup: View {
                 }
                 .buttonStyle(PressablePlainButtonStyle())
 
-                Menu {
-                    ForEach(ProjectWorkspaceMode.allCases, id: \.self) { mode in
-                        Button {
-                            setProjectWorkspaceMode(project.id, mode)
-                        } label: {
-                            if project.workspaceMode == mode {
-                                Label(mode.label, systemImage: "checkmark")
-                            } else {
-                                Text(mode.label)
-                            }
-                        }
-                    }
-                } label: {
-                    Label(
-                        project.workspaceMode.label,
-                        systemImage: project.workspaceMode == .shared ? "square.3.layers.3d.down.right.fill" : "square.split.2x2"
-                    )
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.symbolEffect(.replace))
-                }
-                .menuStyle(.borderlessButton)
-                .help(project.workspaceMode.shortDescription)
-
                 Button {
                     createSession(project.id)
                 } label: {
@@ -130,11 +103,6 @@ private struct ProjectSidebarGroup: View {
                     isProjectHovered = isHovering
                 }
             }
-
-            Text(project.workspaceMode.shortDescription)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 24)
 
             if isExpanded {
                 if project.sessions.isEmpty {

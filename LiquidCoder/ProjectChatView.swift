@@ -55,45 +55,26 @@ struct ProjectChatView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button {
-                    openInFinder(project)
-                } label: {
-                    Label("Finder", systemImage: "folder")
-                }
-                .buttonStyle(PressableButtonStyle())
-
-                Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         showsTerminalSidebar.toggle()
                     }
                 } label: {
-                    Label(
-                        showsTerminalSidebar ? "Hide Terminal" : "Show Terminal",
-                        systemImage: showsTerminalSidebar ? "sidebar.right" : "sidebar.right"
-                    )
+                    Image(systemName: showsTerminalSidebar ? "apple.terminal.fill" : "apple.terminal")
+                        .imageScale(.medium)
+                        .frame(width: 18, height: 18)
+                        .frame(width: 30, height: 30)
                 }
                 .buttonStyle(PressableButtonStyle())
+                .help(showsTerminalSidebar ? "Hide Terminal" : "Show Terminal")
 
                 Menu {
+                    Button("Finder") { openInFinder(project) }
                     Button("Cursor") { openApp("Cursor", project: project) }
                     Button("VS Code") { openApp("Visual Studio Code", project: project) }
-                    Button("Ghostty") { openApp("Ghostty", project: project) }
                 } label: {
-                    Label("Open", systemImage: "arrow.up.forward.app")
-                }
-
-                Divider()
-
-                Button {
-                } label: {
-                    Label("Commit", systemImage: "checkmark.seal")
+                    Label("Open In", systemImage: "arrow.up.forward.app")
                 }
                 .buttonStyle(PressableButtonStyle())
-
-                Button {
-                } label: {
-                    Label("Commit & Push", systemImage: "arrow.up.right.circle")
-                }
-                .buttonStyle(.glassProminent)
             }
         }
     }
@@ -107,7 +88,10 @@ struct ProjectChatView: View {
             }
 
             PromptComposer(
-                project: project,
+                projectName: project.name,
+                projectBranch: project.branch,
+                workspaceMode: $project.workspaceMode,
+                permissionMode: $project.permissionMode,
                 workspace: workspace,
                 isSessionActive: runtime.hasActiveSession(for: session.id),
                 draftPrompt: $draftPrompt,
@@ -307,7 +291,13 @@ private struct SessionStatusBadge: View {
 }
 
 private struct PromptComposer: View {
-    let project: CodexProject
+    private static let composerHorizontalInset: CGFloat = 14
+    private static let composerVerticalInset: CGFloat = 10
+
+    let projectName: String
+    let projectBranch: String
+    @Binding var workspaceMode: ProjectWorkspaceMode
+    @Binding var permissionMode: CodexPermissionMode
     let workspace: CodexWorkspace?
     let isSessionActive: Bool
     @Binding var draftPrompt: String
@@ -316,28 +306,36 @@ private struct PromptComposer: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: $draftPrompt)
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 72, maxHeight: 110)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 8)
-
-                if draftPrompt.isEmpty {
-                    Text(promptPlaceholder)
-                        .foregroundStyle(.secondary.opacity(0.6))
-                        .padding(.horizontal, 18)
-                        .padding(.top, 17)
-                        .allowsHitTesting(false)
-                }
-            }
+            TextField(
+                "",
+                text: $draftPrompt,
+                prompt: Text(promptPlaceholder).foregroundStyle(.secondary.opacity(0.6)),
+                axis: .vertical
+            )
+            .font(.body)
+            .textFieldStyle(.plain)
+            .lineLimit(1...4)
+            .padding(.horizontal, Self.composerHorizontalInset)
+            .padding(.vertical, Self.composerVerticalInset)
+            .frame(minHeight: 72, maxHeight: 110, alignment: .top)
 
             Divider()
 
             HStack(spacing: 14) {
-                Label("Full access", systemImage: "shield.lefthalf.filled")
-                    .foregroundStyle(.orange)
+                Menu {
+                    ForEach(CodexPermissionMode.allCases, id: \.self) { mode in
+                        Button {
+                            permissionMode = mode
+                        } label: {
+                            Label(mode.label, systemImage: mode.systemImage)
+                        }
+                    }
+                } label: {
+                    Label(permissionMode.label, systemImage: permissionMode.systemImage)
+                        .foregroundStyle(permissionTint)
+                }
+                .buttonStyle(.plain)
+                .help(permissionMode.shortDescription)
 
                 if isSessionActive {
                     Label("Session running", systemImage: "waveform")
@@ -346,12 +344,21 @@ private struct PromptComposer: View {
 
                 Spacer()
 
-                Label(project.name, systemImage: "folder")
-                Label(project.workspaceMode.label, systemImage: project.workspaceMode == .shared ? "square.3.layers.3d.down.right" : "square.split.2x2")
+                Label(projectName, systemImage: "folder")
+                Button {
+                    isSharedMode.wrappedValue.toggle()
+                } label: {
+                    Label(workspaceMode.label, systemImage: workspaceMode == .shared ? "square.3.layers.3d.down.right" : "square.split.2x2")
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Toggle workspace mode. Shared reuses the project root worktree.")
                 if let workspace {
                     Label(workspace.branchName, systemImage: "arrow.triangle.branch")
                 } else {
-                    Label(project.branch, systemImage: "arrow.triangle.branch")
+                    Label(projectBranch, systemImage: "arrow.triangle.branch")
                 }
 
                 Button(action: sendPrompt) {
@@ -387,7 +394,7 @@ private struct PromptComposer: View {
     }
 
     private var promptPlaceholder: String {
-        switch project.workspaceMode {
+        switch workspaceMode {
         case .isolated:
             return "Ask Codex anything. The first prompt creates a dedicated worktree and branch for this chat."
         case .shared:
@@ -395,8 +402,26 @@ private struct PromptComposer: View {
         }
     }
 
+    private var isSharedMode: Binding<Bool> {
+        Binding(
+            get: { workspaceMode == .shared },
+            set: { workspaceMode = $0 ? .shared : .isolated }
+        )
+    }
+
     private var sendButtonColor: Color {
         promptIsEmpty ? Color.secondary.opacity(0.55) : Color.accentColor
+    }
+
+    private var permissionTint: Color {
+        switch permissionMode {
+        case .defaultConfig:
+            return .secondary
+        case .manualReview:
+            return .orange
+        case .fullAccess:
+            return .red
+        }
     }
 }
 
@@ -404,13 +429,8 @@ private struct TerminalMonitorSidebar: View {
     @ObservedObject var terminalController: SessionTerminalController
 
     var body: some View {
-        VStack(spacing: 0) {
-            IntegratedTerminalView(controller: terminalController)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .padding(20)
-        .background(.bar)
+        IntegratedTerminalView(controller: terminalController)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
