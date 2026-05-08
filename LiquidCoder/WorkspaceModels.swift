@@ -138,6 +138,7 @@ struct CodexSession: Codable, Identifiable, Hashable {
     var status: CodexSessionStatus
     var threadID: String?
     var workspaceID: CodexWorkspace.ID?
+    var isTerminalVisible: Bool
     var messages: [ChatMessage]
     var terminalEvents: [TerminalEvent]
     var lastCommand: String?
@@ -150,6 +151,7 @@ struct CodexSession: Codable, Identifiable, Hashable {
         status: CodexSessionStatus = .idle,
         threadID: String? = nil,
         workspaceID: CodexWorkspace.ID? = nil,
+        isTerminalVisible: Bool = false,
         messages: [ChatMessage] = [],
         terminalEvents: [TerminalEvent] = [],
         lastCommand: String? = nil,
@@ -161,6 +163,7 @@ struct CodexSession: Codable, Identifiable, Hashable {
         self.status = status
         self.threadID = threadID
         self.workspaceID = workspaceID
+        self.isTerminalVisible = isTerminalVisible
         self.messages = messages
         self.terminalEvents = terminalEvents
         self.lastCommand = lastCommand
@@ -191,6 +194,7 @@ struct CodexSession: Codable, Identifiable, Hashable {
         case status
         case threadID
         case workspaceID
+        case isTerminalVisible
         case messages
         case terminalEvents
         case lastCommand
@@ -205,6 +209,7 @@ struct CodexSession: Codable, Identifiable, Hashable {
         status = try container.decodeIfPresent(CodexSessionStatus.self, forKey: .status) ?? .waitingForInput
         threadID = try container.decodeIfPresent(String.self, forKey: .threadID)
         workspaceID = try container.decodeIfPresent(UUID.self, forKey: .workspaceID)
+        isTerminalVisible = try container.decodeIfPresent(Bool.self, forKey: .isTerminalVisible) ?? false
         messages = try container.decodeIfPresent([ChatMessage].self, forKey: .messages) ?? []
         terminalEvents = try container.decodeIfPresent([TerminalEvent].self, forKey: .terminalEvents) ?? []
         lastCommand = try container.decodeIfPresent(String.self, forKey: .lastCommand)

@@ -19,30 +19,42 @@ struct ProjectChatView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            if geometry.size.width >= 900 {
-                HSplitView {
-                    chatColumn
-                        .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
+            if session.isTerminalVisible {
+                if geometry.size.width >= 900 {
+                    HSplitView {
+                        chatColumn
+                            .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
 
-                    terminalColumn
-                        .frame(minWidth: 260, idealWidth: 320, maxWidth: 400)
+                        terminalColumn
+                            .frame(minWidth: 260, idealWidth: 320, maxWidth: 400)
+                    }
+                } else {
+                    VStack(spacing: 0) {
+                        chatColumn
+
+                        Divider()
+
+                        terminalColumn
+                            .frame(maxWidth: .infinity)
+                            .frame(height: min(320, max(220, geometry.size.height * 0.35)))
+                    }
                 }
             } else {
-                VStack(spacing: 0) {
-                    chatColumn
-
-                    Divider()
-
-                    terminalColumn
-                        .frame(maxWidth: .infinity)
-                        .frame(height: min(320, max(220, geometry.size.height * 0.35)))
-                }
+                chatColumn
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(.background)
         .navigationTitle(project.name)
         .toolbar {
             ToolbarItemGroup {
+                Button {
+                    session.isTerminalVisible.toggle()
+                } label: {
+                    Label("Terminal", systemImage: session.isTerminalVisible ? "terminal.fill" : "terminal")
+                }
+                .help(session.isTerminalVisible ? "Hide Terminal" : "Show Terminal")
+
                 Button {
                     openInFinder(project)
                 } label: {
