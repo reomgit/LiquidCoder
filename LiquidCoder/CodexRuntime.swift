@@ -20,7 +20,6 @@ final class CodexRuntime: ObservableObject {
         "/usr/sbin",
         "/sbin"
     ]
-
     struct PreparedSessionContext {
         let projectID: CodexProject.ID
         let sessionID: CodexSession.ID
@@ -28,6 +27,7 @@ final class CodexRuntime: ObservableObject {
         let securityScopeActive: Bool
         let workspace: CodexWorkspace
         let sourceBranch: String
+        let permissionMode: CodexPermissionMode
         let codexExecutableURL: URL
     }
 
@@ -62,6 +62,9 @@ final class CodexRuntime: ObservableObject {
 
     private struct RunningSession {
         let projectID: CodexProject.ID
+        let sessionTitle: String
+        let workspaceID: CodexWorkspace.ID
+        let workspaceScope: CodexWorkspaceScope
         let process: Process
         let reader: PTYReader
         let masterHandle: FileHandle
@@ -105,6 +108,7 @@ final class CodexRuntime: ObservableObject {
                 securityScopeActive: securityScopeActive,
                 workspace: context.workspace,
                 sourceBranch: context.sourceBranch,
+                permissionMode: project.permissionMode,
                 codexExecutableURL: codexExecutableURL
             )
         } catch let error as RuntimeError {
@@ -179,10 +183,24 @@ final class CodexRuntime: ObservableObject {
         }
 
         do {
+            if let conflictMessage = sharedWorkspaceConflict(context: context) {
+                onEvent(.failed(conflictMessage))
+                releaseSecurityScope(for: context)
+                return
+            }
+
             let launch = try makeLaunchHandles()
             let process = Process()
             process.executableURL = URL(fileURLWithPath: Self.bundledShellPath)
-            process.arguments = ["-lc", shellCommand(isResume: isResume)]
+            process.arguments = [
+                "-lc",
+                shellCommand(
+                    permissionMode: context.permissionMode,
+                    workspacePath: context.workspace.worktreePath,
+                    isResume: isResume,
+                    threadID: session.threadID
+                )
+            ]
             process.currentDirectoryURL = context.workspace.worktreeURL
             process.standardInput = launch.slaveInputHandle
             process.standardOutput = launch.slaveOutputHandle
@@ -212,16 +230,22 @@ final class CodexRuntime: ObservableObject {
                 }
             }
 
-            var command = "$ cd \(context.workspace.worktreePath)\n"
-            command += "$ \(context.codexExecutableURL.path) "
-            if isResume, let threadID = session.threadID, !threadID.isEmpty {
-                command += "--cd \(context.workspace.worktreePath) exec resume --json --full-auto --skip-git-repo-check \(threadID) <prompt>"
-            } else {
-                command += "--cd \(context.workspace.worktreePath) exec --json --color never --full-auto --skip-git-repo-check <prompt>"
-            }
+            let commandArguments = codexLaunchArguments(
+                permissionMode: context.permissionMode,
+                workspacePath: context.workspace.worktreePath,
+                isResume: isResume,
+                threadID: session.threadID
+            )
+            let command = """
+            $ cd \(context.workspace.worktreePath)
+            $ \(context.codexExecutableURL.path) \(commandArguments.joined(separator: " ")) <prompt>
+            """
 
             runningSessions[sessionID] = RunningSession(
                 projectID: context.projectID,
+                sessionTitle: session.title,
+                workspaceID: context.workspace.id,
+                workspaceScope: context.workspace.scope,
                 process: process,
                 reader: reader,
                 masterHandle: launch.masterHandle,
@@ -253,6 +277,23 @@ final class CodexRuntime: ObservableObject {
             releaseSecurityScope(for: context)
             onEvent(.failed("LiquidCoder failed to launch the session process. \(error.localizedDescription)"))
         }
+    }
+
+    private func sharedWorkspaceConflict(context: PreparedSessionContext) -> String? {
+        guard context.workspace.scope == .shared else {
+            return nil
+        }
+
+        guard let active = runningSessions.values.first(where: {
+            $0.projectID == context.projectID
+                && $0.workspaceScope == .shared
+                && $0.workspaceID == context.workspace.id
+                && $0.process.isRunning
+        }) else {
+            return nil
+        }
+
+        return "Shared mode reuses one branch and one worktree for this project. `\(active.sessionTitle)` is already running there. Stop that session or switch the project back to Isolated mode before launching another chat."
     }
 
     private func resolveExecutableURL(named executable: String) -> URL? {
@@ -346,18 +387,61 @@ final class CodexRuntime: ObservableObject {
         return environment
     }
 
-    private func shellCommand(isResume: Bool) -> String {
-        if isResume {
-            return """
-            cd -- "$LC_WORKTREE_ROOT" || exit 1
-            exec "$LC_CODEX_BIN" --cd "$LC_WORKTREE_ROOT" exec resume --json --full-auto --skip-git-repo-check "$LC_THREAD_ID" "$LC_PROMPT"
-            """
-        }
+    private func shellCommand(
+        permissionMode: CodexPermissionMode,
+        workspacePath: String,
+        isResume: Bool,
+        threadID: String?
+    ) -> String {
+        let launchArguments = codexLaunchArguments(
+            permissionMode: permissionMode,
+            workspacePath: workspacePath,
+            isResume: isResume,
+            threadID: threadID
+        )
+            .map(shellQuoted)
+            .joined(separator: " ")
 
         return """
         cd -- "$LC_WORKTREE_ROOT" || exit 1
-        exec "$LC_CODEX_BIN" --cd "$LC_WORKTREE_ROOT" exec --json --color never --full-auto --skip-git-repo-check "$LC_PROMPT"
+        exec "$LC_CODEX_BIN" \(launchArguments) "$LC_PROMPT"
         """
+    }
+
+    private func codexLaunchArguments(
+        permissionMode: CodexPermissionMode,
+        workspacePath: String,
+        isResume: Bool,
+        threadID: String?
+    ) -> [String] {
+        var arguments = ["--cd", workspacePath, "exec"]
+
+        if isResume, let threadID, !threadID.isEmpty {
+            arguments.append("resume")
+            arguments.append("--json")
+            arguments.append(contentsOf: permissionArguments(for: permissionMode))
+            arguments.append("--skip-git-repo-check")
+            arguments.append(threadID)
+            return arguments
+        }
+
+        arguments.append("--json")
+        arguments.append("--color")
+        arguments.append("never")
+        arguments.append(contentsOf: permissionArguments(for: permissionMode))
+        arguments.append("--skip-git-repo-check")
+        return arguments
+    }
+
+    private func permissionArguments(for mode: CodexPermissionMode) -> [String] {
+        switch mode {
+        case .defaultConfig:
+            return []
+        case .manualReview:
+            return ["--sandbox", "danger-full-access", "--ask-for-approval", "untrusted"]
+        case .fullAccess:
+            return ["--dangerously-bypass-approvals-and-sandbox"]
+        }
     }
 
     private func handleTerminalLine(

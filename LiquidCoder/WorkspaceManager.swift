@@ -19,6 +19,7 @@ struct WorkspaceManager {
         case notGitRepository(String)
         case branchLookupFailed(String)
         case worktreeMissing(String)
+        case sharedWorkspaceMissing(String)
         case worktreeCreationFailed(String)
         case excludeUpdateFailed(String)
 
@@ -34,6 +35,8 @@ struct WorkspaceManager {
                 return "LiquidCoder could not determine the source branch for this project. \(details)"
             case .worktreeMissing(let path):
                 return "Session workspace is missing at \(path). LiquidCoder will not fall back to the main project root."
+            case .sharedWorkspaceMissing(let path):
+                return "Shared project workspace is missing at \(path). LiquidCoder will not silently switch roots."
             case .worktreeCreationFailed(let details):
                 return "LiquidCoder failed to create the session worktree. \(details)"
             case .excludeUpdateFailed(let details):
@@ -65,6 +68,30 @@ struct WorkspaceManager {
 
         let sourceBranch = try resolveSourceBranch(rootURL: rootURL)
 
+        switch project.workspaceMode {
+        case .isolated:
+            return try prepareIsolatedWorkspace(
+                for: session,
+                in: project,
+                rootURL: rootURL,
+                sourceBranch: sourceBranch
+            )
+        case .shared:
+            return try prepareSharedWorkspace(
+                for: session,
+                in: project,
+                rootURL: rootURL,
+                sourceBranch: sourceBranch
+            )
+        }
+    }
+
+    private func prepareIsolatedWorkspace(
+        for session: CodexSession,
+        in project: CodexProject,
+        rootURL: URL,
+        sourceBranch: String
+    ) throws -> WorkspaceContext {
         if let workspaceID = session.workspaceID, let existing = project.workspace(id: workspaceID) {
             guard fileManager.fileExists(atPath: existing.worktreePath) else {
                 throw WorkspaceError.worktreeMissing(existing.worktreePath)
@@ -87,6 +114,7 @@ struct WorkspaceManager {
             let workspace = CodexWorkspace(
                 projectID: project.id,
                 sessionID: session.id,
+                scope: .isolated,
                 branchName: branchName,
                 worktreePath: worktreeURL.path,
                 baseRef: sourceBranch
@@ -111,8 +139,41 @@ struct WorkspaceManager {
         let workspace = CodexWorkspace(
             projectID: project.id,
             sessionID: session.id,
+            scope: .isolated,
             branchName: branchName,
             worktreePath: worktreeURL.path,
+            baseRef: sourceBranch
+        )
+        return WorkspaceContext(workspace: workspace, sourceBranch: sourceBranch)
+    }
+
+    private func prepareSharedWorkspace(
+        for session: CodexSession,
+        in project: CodexProject,
+        rootURL: URL,
+        sourceBranch: String
+    ) throws -> WorkspaceContext {
+        if let workspaceID = session.workspaceID, let existing = project.workspace(id: workspaceID) {
+            guard fileManager.fileExists(atPath: existing.worktreePath) else {
+                throw WorkspaceError.sharedWorkspaceMissing(existing.worktreePath)
+            }
+            return WorkspaceContext(workspace: existing, sourceBranch: sourceBranch)
+        }
+
+        if let existing = project.sharedWorkspace {
+            guard fileManager.fileExists(atPath: existing.worktreePath) else {
+                throw WorkspaceError.sharedWorkspaceMissing(existing.worktreePath)
+            }
+            return WorkspaceContext(workspace: existing, sourceBranch: sourceBranch)
+        }
+
+        try ensureWorktreeMetadataIgnored(rootURL: rootURL)
+
+        let workspace = CodexWorkspace(
+            projectID: project.id,
+            scope: .shared,
+            branchName: sourceBranch,
+            worktreePath: rootURL.path,
             baseRef: sourceBranch
         )
         return WorkspaceContext(workspace: workspace, sourceBranch: sourceBranch)

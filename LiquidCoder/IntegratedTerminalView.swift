@@ -10,6 +10,8 @@ import Combine
 import SwiftTerm
 import SwiftUI
 
+private typealias TerminalPaletteColor = SwiftTerm.Color
+
 @MainActor
 final class SessionTerminalStore: ObservableObject {
     private var controllers: [TerminalControllerKey: SessionTerminalController] = [:]
@@ -124,24 +126,66 @@ final class SessionTerminalController: NSObject, ObservableObject, LocalProcessT
         releaseSecurityScope()
     }
 
+    func refreshAppearance() {
+        applySystemTheme()
+    }
+
     private func configureTerminalView() {
         terminalView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        terminalView.nativeBackgroundColor = NSColor(
-            calibratedRed: 0.08,
-            green: 0.09,
-            blue: 0.11,
-            alpha: 1
-        )
-        terminalView.nativeForegroundColor = NSColor(
-            calibratedRed: 0.88,
-            green: 0.90,
-            blue: 0.93,
-            alpha: 1
-        )
-        terminalView.caretColor = NSColor.systemMint
+        applySystemTheme()
         terminalView.getTerminal().setCursorStyle(.steadyBlock)
+        terminalView.getTerminal().ansi256PaletteStrategy = .base16LabHarmonious
         terminalView.optionAsMetaKey = true
         terminalView.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    private func applySystemTheme() {
+        let background = NSColor.controlBackgroundColor
+        let foreground = NSColor.labelColor
+
+        terminalView.nativeBackgroundColor = background
+        terminalView.nativeForegroundColor = foreground
+        terminalView.installColors(Self.makeTerminalPalette(background: background, foreground: foreground))
+        terminalView.caretColor = NSColor.controlAccentColor
+    }
+
+    private static func makeTerminalPalette(background: NSColor, foreground: NSColor) -> [TerminalPaletteColor] {
+        let dimForeground = foreground.withSystemEffect(.disabled)
+        let elevatedBackground = background.blended(withFraction: 0.16, of: foreground) ?? foreground
+
+        return [
+            terminalColor(background),
+            terminalColor(NSColor.systemRed),
+            terminalColor(NSColor.systemGreen),
+            terminalColor(NSColor.systemYellow),
+            terminalColor(NSColor.systemBlue),
+            terminalColor(NSColor.systemPink),
+            terminalColor(NSColor.systemTeal),
+            terminalColor(dimForeground),
+            terminalColor(elevatedBackground),
+            terminalColor(NSColor.systemRed.highlight(withLevel: 0.18) ?? NSColor.systemRed),
+            terminalColor(NSColor.systemGreen.highlight(withLevel: 0.18) ?? NSColor.systemGreen),
+            terminalColor(NSColor.systemYellow.highlight(withLevel: 0.12) ?? NSColor.systemYellow),
+            terminalColor(NSColor.systemBlue.highlight(withLevel: 0.16) ?? NSColor.systemBlue),
+            terminalColor(NSColor.systemPink.highlight(withLevel: 0.14) ?? NSColor.systemPink),
+            terminalColor(NSColor.systemTeal.highlight(withLevel: 0.14) ?? NSColor.systemTeal),
+            terminalColor(foreground)
+        ]
+    }
+
+    private static func terminalColor(_ color: NSColor) -> TerminalPaletteColor {
+        let resolved = color.usingColorSpace(.sRGB) ?? color
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 1
+        resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+
+        return TerminalPaletteColor(
+            red: UInt16(max(0, min(65535, Int(red * 65535)))),
+            green: UInt16(max(0, min(65535, Int(green * 65535)))),
+            blue: UInt16(max(0, min(65535, Int(blue * 65535))))
+        )
     }
 
     private func releaseSecurityScope() {
@@ -263,12 +307,14 @@ struct IntegratedTerminalView: NSViewRepresentable {
 
     func updateNSView(_ nsView: TerminalContainerView, context: Context) {
         nsView.attach(controller.terminalView)
+        controller.refreshAppearance()
         controller.ensureStarted()
     }
 }
 
 final class TerminalContainerView: NSView {
     private weak var hostedTerminal: NSView?
+    private let contentInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -284,7 +330,13 @@ final class TerminalContainerView: NSView {
 
     func attach(_ terminalView: NSView) {
         guard hostedTerminal !== terminalView else {
-            terminalView.frame = bounds
+            terminalView.frame = NSRect(
+                x: contentInsets.left,
+                y: contentInsets.bottom,
+                width: max(0, bounds.width - contentInsets.left - contentInsets.right),
+                height: max(0, bounds.height - contentInsets.top - contentInsets.bottom)
+            )
+            hideTerminalScrollers(in: terminalView)
             return
         }
 
@@ -293,11 +345,13 @@ final class TerminalContainerView: NSView {
         addSubview(terminalView)
 
         NSLayoutConstraint.activate([
-            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            terminalView.topAnchor.constraint(equalTo: topAnchor),
-            terminalView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: contentInsets.left),
+            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -contentInsets.right),
+            terminalView.topAnchor.constraint(equalTo: topAnchor, constant: contentInsets.top),
+            terminalView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -contentInsets.bottom)
         ])
+
+        hideTerminalScrollers(in: terminalView)
 
         DispatchQueue.main.async { [weak self] in
             guard let self else {
@@ -305,6 +359,18 @@ final class TerminalContainerView: NSView {
             }
 
             self.window?.makeFirstResponder(terminalView)
+        }
+    }
+
+    private func hideTerminalScrollers(in view: NSView) {
+        if let scroller = view as? NSScroller {
+            scroller.isHidden = true
+            scroller.alphaValue = 0
+            return
+        }
+
+        for subview in view.subviews {
+            hideTerminalScrollers(in: subview)
         }
     }
 }
