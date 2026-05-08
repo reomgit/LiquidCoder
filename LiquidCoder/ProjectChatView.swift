@@ -16,12 +16,11 @@ struct ProjectChatView: View {
     @ObservedObject var terminalStore: SessionTerminalStore
     @Binding var draftPrompt: String
     let sendPrompt: () -> Void
-    @State private var showsTerminalSidebar = true
 
     var body: some View {
         GeometryReader { geometry in
-            if geometry.size.width >= 900 {
-                if showsTerminalSidebar {
+            if session.isTerminalVisible {
+                if geometry.size.width >= 900 {
                     HSplitView {
                         chatColumn
                             .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
@@ -30,11 +29,6 @@ struct ProjectChatView: View {
                             .frame(minWidth: 260, idealWidth: 320, maxWidth: 400)
                     }
                 } else {
-                    chatColumn
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            } else {
-                if showsTerminalSidebar {
                     VStack(spacing: 0) {
                         chatColumn
 
@@ -44,10 +38,10 @@ struct ProjectChatView: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: min(320, max(220, geometry.size.height * 0.35)))
                     }
-                } else {
-                    chatColumn
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+            } else {
+                chatColumn
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(.background)
@@ -56,16 +50,16 @@ struct ProjectChatView: View {
             ToolbarItemGroup {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
-                        showsTerminalSidebar.toggle()
+                        session.isTerminalVisible.toggle()
                     }
                 } label: {
-                    Image(systemName: showsTerminalSidebar ? "apple.terminal.fill" : "apple.terminal")
+                    Image(systemName: session.isTerminalVisible ? "apple.terminal.fill" : "apple.terminal")
                         .imageScale(.medium)
                         .frame(width: 18, height: 18)
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(PressableButtonStyle())
-                .help(showsTerminalSidebar ? "Hide Terminal" : "Show Terminal")
+                .help(session.isTerminalVisible ? "Hide Terminal" : "Show Terminal")
 
                 Menu {
                     Button("Finder") { openInFinder(project) }
