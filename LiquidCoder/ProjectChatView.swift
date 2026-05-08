@@ -49,38 +49,26 @@ struct ProjectChatView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button {
-                    session.isTerminalVisible.toggle()
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        session.isTerminalVisible.toggle()
+                    }
                 } label: {
-                    Label("Terminal", systemImage: session.isTerminalVisible ? "terminal.fill" : "terminal")
+                    Image(systemName: session.isTerminalVisible ? "apple.terminal.fill" : "apple.terminal")
+                        .imageScale(.medium)
+                        .frame(width: 18, height: 18)
+                        .frame(width: 30, height: 30)
                 }
+                .buttonStyle(PressableButtonStyle())
                 .help(session.isTerminalVisible ? "Hide Terminal" : "Show Terminal")
 
-                Button {
-                    openInFinder(project)
-                } label: {
-                    Label("Finder", systemImage: "folder")
-                }
-
                 Menu {
+                    Button("Finder") { openInFinder(project) }
                     Button("Cursor") { openApp("Cursor", project: project) }
                     Button("VS Code") { openApp("Visual Studio Code", project: project) }
-                    Button("Ghostty") { openApp("Ghostty", project: project) }
                 } label: {
-                    Label("Open", systemImage: "arrow.up.forward.app")
+                    Label("Open In", systemImage: "arrow.up.forward.app")
                 }
-
-                Divider()
-
-                Button {
-                } label: {
-                    Label("Commit", systemImage: "checkmark.seal")
-                }
-
-                Button {
-                } label: {
-                    Label("Commit & Push", systemImage: "arrow.up.right.circle")
-                }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(PressableButtonStyle())
             }
         }
     }
@@ -94,7 +82,10 @@ struct ProjectChatView: View {
             }
 
             PromptComposer(
-                project: project,
+                projectName: project.name,
+                projectBranch: project.branch,
+                workspaceMode: $project.workspaceMode,
+                permissionMode: $project.permissionMode,
                 workspace: workspace,
                 isSessionActive: runtime.hasActiveSession(for: session.id),
                 draftPrompt: $draftPrompt,
@@ -113,9 +104,6 @@ struct ProjectChatView: View {
         )
 
         return TerminalMonitorSidebar(
-            project: project,
-            session: session,
-            workspace: workspace,
             terminalController: terminalController
         )
     }
@@ -157,7 +145,7 @@ private struct NewSessionContent: View {
             Text("What should Codex do in \(project.name)?")
                 .font(.largeTitle.weight(.semibold))
                 .multilineTextAlignment(.center)
-            Text("This session is idle. Your first message creates an isolated workspace, launches Codex there, and keeps the thread resumable.")
+            Text(sessionIntro)
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -170,6 +158,15 @@ private struct NewSessionContent: View {
         }
         .padding(48)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var sessionIntro: String {
+        switch project.workspaceMode {
+        case .isolated:
+            return "This session is idle. Your first message creates a dedicated worktree and branch for this chat, launches Codex there, and keeps the thread resumable."
+        case .shared:
+            return "This session is idle. Your first message reuses the project root branch and worktree, launches Codex there, and keeps the thread resumable. LiquidCoder blocks concurrent shared runs so chats do not stomp each other."
+        }
     }
 }
 
@@ -288,36 +285,51 @@ private struct SessionStatusBadge: View {
 }
 
 private struct PromptComposer: View {
-    let project: CodexProject
+    private static let composerHorizontalInset: CGFloat = 14
+    private static let composerVerticalInset: CGFloat = 10
+
+    let projectName: String
+    let projectBranch: String
+    @Binding var workspaceMode: ProjectWorkspaceMode
+    @Binding var permissionMode: CodexPermissionMode
     let workspace: CodexWorkspace?
     let isSessionActive: Bool
     @Binding var draftPrompt: String
     let sendPrompt: () -> Void
+    @State private var sendHovered = false
 
     var body: some View {
         VStack(spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: $draftPrompt)
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 72, maxHeight: 110)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 8)
-
-                if draftPrompt.isEmpty {
-                    Text("Ask Codex anything. The first prompt creates an isolated worktree for this session.")
-                        .foregroundStyle(.secondary.opacity(0.6))
-                        .padding(.horizontal, 18)
-                        .padding(.top, 17)
-                        .allowsHitTesting(false)
-                }
-            }
+            TextField(
+                "",
+                text: $draftPrompt,
+                prompt: Text(promptPlaceholder).foregroundStyle(.secondary.opacity(0.6)),
+                axis: .vertical
+            )
+            .font(.body)
+            .textFieldStyle(.plain)
+            .lineLimit(1...4)
+            .padding(.horizontal, Self.composerHorizontalInset)
+            .padding(.vertical, Self.composerVerticalInset)
+            .frame(minHeight: 72, maxHeight: 110, alignment: .top)
 
             Divider()
 
             HStack(spacing: 14) {
-                Label("Full access", systemImage: "shield.lefthalf.filled")
-                    .foregroundStyle(.orange)
+                Menu {
+                    ForEach(CodexPermissionMode.allCases, id: \.self) { mode in
+                        Button {
+                            permissionMode = mode
+                        } label: {
+                            Label(mode.label, systemImage: mode.systemImage)
+                        }
+                    }
+                } label: {
+                    Label(permissionMode.label, systemImage: permissionMode.systemImage)
+                        .foregroundStyle(permissionTint)
+                }
+                .buttonStyle(.plain)
+                .help(permissionMode.shortDescription)
 
                 if isSessionActive {
                     Label("Session running", systemImage: "waveform")
@@ -326,22 +338,39 @@ private struct PromptComposer: View {
 
                 Spacer()
 
-                Label(project.name, systemImage: "folder")
+                Label(projectName, systemImage: "folder")
+                Button {
+                    isSharedMode.wrappedValue.toggle()
+                } label: {
+                    Label(workspaceMode.label, systemImage: workspaceMode == .shared ? "square.3.layers.3d.down.right" : "square.split.2x2")
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Toggle workspace mode. Shared reuses the project root worktree.")
                 if let workspace {
                     Label(workspace.branchName, systemImage: "arrow.triangle.branch")
                 } else {
-                    Label(project.branch, systemImage: "arrow.triangle.branch")
+                    Label(projectBranch, systemImage: "arrow.triangle.branch")
                 }
 
                 Button(action: sendPrompt) {
-                    Image(systemName: "arrow.up")
+                    Image(systemName: promptIsEmpty ? "arrow.up" : "arrow.up.circle.fill")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 30, height: 30)
                         .background(sendButtonColor, in: Circle())
+                        .scaleEffect(sendHovered && !promptIsEmpty ? 1.06 : 1)
+                        .contentTransition(.symbolEffect(.replace))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressablePlainButtonStyle(pressedScale: 0.9))
                 .disabled(promptIsEmpty)
+                .onHover { isHovering in
+                    withAnimation(.easeInOut(duration: 0.14)) {
+                        sendHovered = isHovering
+                    }
+                }
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
@@ -350,89 +379,52 @@ private struct PromptComposer: View {
         }
         .glassEffect(.regular.tint(.white.opacity(0.20)).interactive(), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .frame(maxWidth: 760)
+        .animation(.easeInOut(duration: 0.16), value: promptIsEmpty)
+        .animation(.spring(response: 0.24, dampingFraction: 0.72), value: isSessionActive)
     }
 
     private var promptIsEmpty: Bool {
         draftPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSessionActive
     }
 
+    private var promptPlaceholder: String {
+        switch workspaceMode {
+        case .isolated:
+            return "Ask Codex anything. The first prompt creates a dedicated worktree and branch for this chat."
+        case .shared:
+            return "Ask Codex anything. The first prompt reuses the project root branch and worktree for this chat."
+        }
+    }
+
+    private var isSharedMode: Binding<Bool> {
+        Binding(
+            get: { workspaceMode == .shared },
+            set: { workspaceMode = $0 ? .shared : .isolated }
+        )
+    }
+
     private var sendButtonColor: Color {
         promptIsEmpty ? Color.secondary.opacity(0.55) : Color.accentColor
+    }
+
+    private var permissionTint: Color {
+        switch permissionMode {
+        case .defaultConfig:
+            return .secondary
+        case .manualReview:
+            return .orange
+        case .fullAccess:
+            return .red
+        }
     }
 }
 
 private struct TerminalMonitorSidebar: View {
-    let project: CodexProject
-    let session: CodexSession
-    let workspace: CodexWorkspace?
     @ObservedObject var terminalController: SessionTerminalController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Terminal")
-                    .font(.headline.weight(.semibold))
-
-                Spacer()
-
-                SessionStatusBadge(status: session.status)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                DetailRow(label: "Project", value: project.name)
-                DetailRow(label: "Root", value: project.rootPath)
-                if let workspace {
-                    DetailRow(label: "Branch", value: workspace.branchName)
-                    DetailRow(label: "Worktree", value: workspace.worktreePath)
-                }
-                if let threadID = session.threadID {
-                    DetailRow(label: "Thread", value: threadID)
-                }
-                DetailRow(
-                    label: terminalController.currentDirectory == nil ? "Shell Root" : "Shell CWD",
-                    value: terminalController.currentDirectory ?? terminalController.workingDirectory
-                )
-            }
-
-            HStack {
-                Text(terminalController.terminalTitle)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                if let lastExitCode = terminalController.lastExitCode {
-                    Text("exit \(lastExitCode)")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            IntegratedTerminalView(controller: terminalController)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .padding(20)
-        .background(.bar)
-    }
-}
-
-private struct DetailRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(2)
-                .truncationMode(.middle)
-        }
+        IntegratedTerminalView(controller: terminalController)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

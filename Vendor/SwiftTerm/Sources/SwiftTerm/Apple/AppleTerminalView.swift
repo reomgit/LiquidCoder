@@ -1338,6 +1338,8 @@ extension TerminalView {
             context.setShouldAntialias(false)
             context.setLineCap(.square)
             context.setLineWidth(0)
+            let transparentDefaultBackground = nativeBackgroundColor.alphaComponent == 0
+            let defaultBackgroundColor = TTColor.make(color: terminal.backgroundColor)
 
             for prepared in preparedSegments {
                 var processedGlyphs = 0
@@ -1357,6 +1359,13 @@ extension TerminalView {
                     }
 
                     if let backgroundColor = backgroundColor {
+                        let isSelectionBackground = runAttributes.keys.contains(.selectionBackgroundColor)
+                        let isDefaultBackground = !isSelectionBackground && backgroundColor == defaultBackgroundColor
+                        if transparentDefaultBackground && isDefaultBackground {
+                            processedGlyphs += runGlyphsCount
+                            continue
+                        }
+
                         let columnSpan = max(0, endColumn - startColumn)
                         if columnSpan > 0 {
                             context.setFillColor(backgroundColor.cgColor)

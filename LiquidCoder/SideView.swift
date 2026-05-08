@@ -50,6 +50,8 @@ struct SideView: View {
                 .buttonStyle(.glass)
             }
         }
+        .animation(.snappy(duration: 0.24, extraBounce: 0.08), value: expandedProjectIDs)
+        .animation(.easeInOut(duration: 0.18), value: selectedSessionID)
     }
 }
 
@@ -60,34 +62,46 @@ private struct ProjectSidebarGroup: View {
     let toggleProjectExpansion: (CodexProject.ID) -> Void
     let selectSession: (CodexProject.ID, CodexSession.ID) -> Void
     let createSession: (CodexProject.ID) -> Void
+    @State private var isProjectHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Button {
-                    toggleProjectExpansion(project.id)
+                    withAnimation(.snappy(duration: 0.24, extraBounce: 0.1)) {
+                        toggleProjectExpansion(project.id)
+                    }
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        Image(systemName: "chevron.right")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .animation(.snappy(duration: 0.22), value: isExpanded)
 
-                        Label(project.name, systemImage: "folder")
+                        Label(project.name, systemImage: isExpanded ? "folder.fill" : "folder")
                             .foregroundStyle(.primary)
+                            .contentTransition(.symbolEffect(.replace))
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressablePlainButtonStyle())
 
                 Button {
                     createSession(project.id)
                 } label: {
-                    Image(systemName: "square.and.pencil")
-                        .foregroundStyle(.secondary)
+                    Image(systemName: isProjectHovered ? "square.and.pencil.circle.fill" : "square.and.pencil")
+                        .foregroundStyle(isProjectHovered ? Color.accentColor : .secondary)
+                        .contentTransition(.symbolEffect(.replace))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressablePlainButtonStyle(pressedScale: 0.92))
                 .help("New Chat")
+            }
+            .onHover { isHovering in
+                withAnimation(.easeInOut(duration: 0.14)) {
+                    isProjectHovered = isHovering
+                }
             }
 
             if isExpanded {
@@ -100,15 +114,19 @@ private struct ProjectSidebarGroup: View {
                             .foregroundStyle(.secondary)
                             .padding(.leading, 24)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressablePlainButtonStyle())
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 } else {
                     ForEach(project.sessions) { session in
                         Button {
-                            selectSession(project.id, session.id)
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                selectSession(project.id, session.id)
+                            }
                         } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: session.status.systemImage)
+                                Image(systemName: icon(for: session))
                                     .foregroundStyle(selectedSessionID == session.id ? .primary : .secondary)
+                                    .contentTransition(.symbolEffect(.replace))
                                 Text(session.title)
                                     .lineLimit(1)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -119,7 +137,8 @@ private struct ProjectSidebarGroup: View {
                             .background(rowBackground(for: session), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .padding(.leading, 20)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressablePlainButtonStyle())
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
             }
@@ -129,5 +148,26 @@ private struct ProjectSidebarGroup: View {
 
     private func rowBackground(for session: CodexSession) -> Color {
         selectedSessionID == session.id ? Color.accentColor.opacity(0.16) : .clear
+    }
+
+    private func icon(for session: CodexSession) -> String {
+        if selectedSessionID == session.id {
+            return "bubble.left.and.bubble.right.fill"
+        }
+
+        switch session.status {
+        case .running, .launching:
+            return "waveform.circle.fill"
+        case .waitingForInput:
+            return "pause.circle.fill"
+        case .completed:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "xmark.circle.fill"
+        case .cancelled:
+            return "slash.circle.fill"
+        case .idle:
+            return "bubble.left.and.bubble.right"
+        }
     }
 }
